@@ -1,0 +1,1652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>The Ninth Day</title>
+<style>
+  :root { --bar: 0px; --ink: #e7dcc2; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    color: var(--ink);
+    font-family: "Cormorant Garamond", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    user-select: none; -webkit-user-select: none;
+  }
+  #scene {
+    position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh;
+    display: block; touch-action: manipulation; cursor: default;
+  }
+  .cap {
+    position: fixed; left: 50%; bottom: calc(var(--bar) + 6.5vh);
+    width: min(92vw, 920px); text-align: center; pointer-events: none;
+    opacity: 0; filter: blur(7px); transform: translate(-50%, 12px);
+    transition: opacity 2.6s ease, filter 2.6s ease, transform 3.2s cubic-bezier(.2,.7,.2,1);
+    text-shadow: 0 1px 22px rgba(0,0,0,.9), 0 0 3px rgba(0,0,0,.55);
+  }
+  .cap.on { opacity: 1; filter: blur(0); transform: translate(-50%, 0); }
+  .cap .sm {
+    display: block; margin-bottom: .95em; opacity: .7;
+    font-size: clamp(9px, 1.25vw, 14px); letter-spacing: .44em; text-transform: uppercase;
+  }
+  .cap .lg {
+    display: block; font-style: italic; font-weight: 400; letter-spacing: .035em;
+    font-size: clamp(21px, 3.5vw, 44px);
+  }
+  .cap.top { bottom: auto; top: calc(var(--bar) + 7vh); }
+  .cap.top .sm { margin: .95em 0 0; }
+  #pause {
+    position: fixed; right: 16px; top: calc(var(--bar) + 14px);
+    font: 500 10px/1 system-ui, sans-serif; letter-spacing: .3em; text-transform: uppercase;
+    color: rgba(231,220,194,.65); opacity: 0; transition: opacity .5s ease; pointer-events: none;
+  }
+  #pause.on { opacity: 1; }
+  @media (orientation: portrait) {
+    .cap { bottom: calc(var(--bar) + 9vh); }
+    .cap .lg { font-size: clamp(22px, 6.6vw, 38px); }
+    .cap .sm { font-size: clamp(9px, 2.6vw, 13px); letter-spacing: .32em; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="Animated scene: a starving Triceratops in an ash-covered landscape after the asteroid impact lies down beside a dead tree and dies."></canvas>
+<div id="capA" class="cap top"><span class="lg">Nine days after the impact</span><span class="sm">Late Cretaceous &middot; 66 million years ago</span></div>
+<div id="capB" class="cap top"><span class="lg">The ash kept falling.</span><span class="sm">The long winter had only begun</span></div>
+<div id="pause">Paused</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
+const cvs = document.getElementById('scene');
+const ctx = cvs.getContext('2d', { alpha: false });
+const TAU = Math.PI * 2, PI = Math.PI, DEG = PI / 180;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const frac = x => x - Math.floor(x);
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const sm = t => t * t * (3 - 2 * t);
+const ein = t => t * t * t;
+const eout = t => 1 - Math.pow(1 - t, 3);
+const mod = (a, n) => ((a % n) + n) % n;
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function makeNoise(seed) {
+  const r = mulberry32(seed), v = new Float32Array(1024);
+  for (let i = 0; i < 1024; i++) v[i] = r() * 2 - 1;
+  return x => {
+    const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f);
+    const a = v[i & 1023], b = v[(i + 1) & 1023];
+    return a + (b - a) * u;
+  };
+}
+function fbm(n, x, o = 4) {
+  let s = 0, a = 1, f = 1, m = 0;
+  for (let i = 0; i < o; i++) { s += a * n(x * f + i * 17.31); m += a; a *= 0.5; f *= 2.07; }
+  return s / m;
+}
+const N1 = makeNoise(11), N2 = makeNoise(23), N3 = makeNoise(37), N4 = makeNoise(41), N5 = makeNoise(53);
+
+/* Keyframe track: [[time, value, easing?], ...] */
+function track(keys) {
+  return t => {
+    if (t <= keys[0][0]) return keys[0][1];
+    for (let i = 1; i < keys.length; i++) {
+      const b = keys[i];
+      if (t <= b[0]) {
+        const a = keys[i - 1];
+        const u = (t - a[0]) / (b[0] - a[0]);
+        return a[1] + (b[1] - a[1]) * (b[2] || sm)(u);
+      }
+    }
+    return keys[keys.length - 1][1];
+  };
+}
+
+/* Closed / open Catmull-Rom spline into a Path2D */
+function crPath(pts, closed, path = new Path2D()) {
+  const n = pts.length;
+  const P = i => closed ? pts[(i + n) % n] : pts[clamp(i, 0, n - 1)];
+  path.moveTo(pts[0][0], pts[0][1]);
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+    path.bezierCurveTo(
+      p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6,
+      p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6,
+      p2[0], p2[1]);
+  }
+  if (closed) path.closePath();
+  return path;
+}
+function crSample(pts, closed, per) {
+  const n = pts.length, out = [];
+  const P = i => closed ? pts[(i + n) % n] : pts[clamp(i, 0, n - 1)];
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+    for (let k = 0; k < per; k++) {
+      const t = k / per, t2 = t * t, t3 = t2 * t;
+      const f = (a, b, c, d) => 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+      out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1]), i]);
+    }
+  }
+  return out;
+}
+
+/* Two-bone IK. bend = +1 joint points backward (elbow), -1 forward (knee). */
+function ik(ax, ay, bx, by, l1, l2, bend) {
+  let dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy) || 0.001;
+  const maxd = l1 + l2 - 0.5;
+  if (d > maxd) { dx *= maxd / d; dy *= maxd / d; d = maxd; }
+  const mind = Math.abs(l1 - l2) + 1;
+  if (d < mind) { dx *= mind / d; dy *= mind / d; d = mind; }
+  const a = (l1 * l1 - l2 * l2 + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, l1 * l1 - a * a));
+  const ux = dx / d, uy = dy / d;
+  return [ax + ux * a - uy * h * bend, ay + uy * a + ux * h * bend, ax + dx, ay + dy];
+}
+
+/* ==========================================================================
+   Timeline (seconds). Everything is a pure function of t, precomputed where
+   integration is needed so footsteps never slide.
+   ========================================================================== */
+const DT = 0.01, T_END = 92, NT = Math.ceil(T_END / DT) + 4;
+const T_STOP = 31, X0 = -780;
+const tabX = new Float64Array(NT), tabV = new Float32Array(NT), tabB = new Float64Array(NT);
+const STUM_NOM = [11.4, 21.2], STUM = STUM_NOM.slice();
+let STRIDE = 104;
+
+const stumbleK = (t, ts) => {
+  const u = t - ts;
+  if (u < -0.14) return 0;
+  if (u < 0.2) return sstep(-0.14, 0.2, u);
+  return Math.exp(-(u - 0.2) * 1.45);
+};
+function speedAt(t) {
+  let v = 44 - 10 * clamp(t / 30, 0, 1);
+  for (const s of STUM) v *= 1 - 0.82 * stumbleK(t, s);
+  v *= 1 - sstep(24.5, T_STOP, t);
+  return Math.max(0, v);
+}
+function integrate() {
+  let x = X0;
+  for (let i = 0; i < NT; i++) { tabX[i] = x; const v = speedAt(i * DT); tabV[i] = v; x += v * DT; }
+  const D = tabX[NT - 1] - X0;
+  STRIDE = D / Math.round(D / 104);          // stop exactly on a whole gait cycle
+}
+for (let it = 0; it < 4; it++) {
+  integrate();
+  // the near front foot (phase offset .75) lands when phase ≡ .25 — buckle exactly then
+  for (let j = 0; j < STUM.length; j++) {
+    let best = STUM[j], bd = 1e9;
+    for (let i = Math.floor((STUM_NOM[j] - 1.6) / DT); i < (STUM_NOM[j] + 1.6) / DT; i++) {
+      const a = (tabX[i] - X0) / STRIDE - 0.25, b = (tabX[i + 1] - X0) / STRIDE - 0.25;
+      if (Math.floor(a) !== Math.floor(b)) {
+        const tt = i * DT;
+        if (Math.abs(tt - STUM_NOM[j]) < bd) { bd = Math.abs(tt - STUM_NOM[j]); best = tt; }
+      }
+    }
+    STUM[j] = best;
+  }
+}
+integrate();
+const ROOT_END = tabX[NT - 1];
+const TREE_X = ROOT_END + 252;
+
+/* Breathing: integrate a slowing rate; stop on a full exhale. */
+let T_DEATH = 999;
+(() => {
+  let ph = 0, dead = false, endRate = 0, target = 0;
+  for (let i = 0; i < NT; i++) {
+    const t = i * DT;
+    tabB[i] = ph;
+    let r;
+    if (t < T_STOP) r = 0.42;
+    else if (t < 38.5) r = lerp(0.58, 0.5, sstep(31, 38.5, t));
+    else if (t < 47) r = 0.5;
+    else if (t < 58) r = lerp(0.5, 0.33, sstep(47, 58, t));
+    else if (t < 66) r = lerp(0.3, 0.16, sstep(58, 66, t));
+    else {
+      if (endRate === 0) { target = Math.ceil(ph + 0.55); endRate = (target - ph) / 5.4; }  // last breaths, ending ~71.4s
+      r = endRate;
+    }
+    if (!dead) {
+      if (target && ph + r * DT >= target) { ph = target; dead = true; T_DEATH = t; }
+      else ph += r * DT;
+    }
+  }
+})();
+
+const samp = (tab, t) => {
+  const f = clamp(t, 0, T_END) / DT, i = Math.floor(f), u = f - i;
+  return tab[i] + (tab[Math.min(i + 1, NT - 1)] - tab[i]) * u;
+};
+
+/* Pose tracks */
+const hipTrack = track([[0, 148], [38.6, 147], [40.4, 126], [41.7, 122], [43.3, 103], [44.9, 97], [46.8, 70], [92, 70]]);
+const shTrack = track([[0, 120], [38.6, 119], [40.4, 114], [42.0, 110], [43.1, 106], [43.75, 50, ein], [44.15, 56], [44.8, 45], [47.2, 40], [92, 40]]);
+const neckDrop = track([[0, 0], [44, 0], [46.5, 6], [55.5, 8], [58.6, 24], [92, 24]]);
+const headTrack = track([
+  [0, 22], [20, 25], [30, 28], [31.6, 31], [33.6, 30], [35.7, 4], [37.2, 6], [38.9, 31], [41, 33], [43.3, 37],
+  [43.9, 46], [45.3, 6], [47, -7], [50, -5], [52.5, 14], [53.5, 13], [54.6, -2], [55.4, 3], [56.2, 22], [58.7, 44], [92, 44]]);
+const tremAmp = track([[0, 0.12], [26, 0.35], [31.5, 0.9], [36, 1.0], [38.6, 1.8], [41, 2.6], [43.5, 2.2], [46.8, 0.8], [52, 0.45], [60, 0.22], [66, 0.1], [70, 0]]);
+const wobAmp = track([[0, 1.2], [31, 1.7], [46, 1.5], [56, 1.2], [59, 0.45], [64, 0.2], [69, 0]]);
+const breathAmp = track([[0, 0.5], [31, 0.6], [32.5, 1], [47, 1], [58, 0.95], [70, 0.42]]);
+const eyeBase = track([
+  [0, 0.82], [25, 0.74], [31, 0.7], [34.6, 0.7], [35.7, 0.88], [37.5, 0.8], [39, 0.62], [47, 0.6], [55, 0.52],
+  [60, 0.44], [63.5, 0.35], [65.6, 0.2], [67.3, 0.03], [68.2, 0], [92, 0]]);
+const BLINKS = [[3.4, .3], [7.9, .3], [12.0, .26], [16.6, .32], [21.9, .26], [26.1, .36], [30.2, .4], [33.1, .42],
+  [37.9, .45], [42.4, .3], [48.2, .55], [51.6, .6], [55.9, .7], [59.8, .9], [62.9, 1.05], [65.0, 1.3]];
+function blinkAt(t) {
+  let m = 0;
+  for (const [tb, d] of BLINKS) {
+    const u = (t - tb) / d;
+    if (u > 0 && u < 1) m = Math.max(m, u < 0.35 ? sm(u / 0.35) : 1 - sm((u - 0.35) / 0.65));
+  }
+  return m;
+}
+
+/* Camera */
+const camYTrack = track([[0, -770], [2.2, -770], [10.5, -236], [40, -228], [60, -214], [73, -214], [87, -330]]);
+const zoomTrack = track([[0, 1], [30, 1], [40, 1.07], [58, 1.19], [73, 1.24], [87, 0.97]]);
+const tabCX = new Float32Array(NT);
+(() => {
+  let c = X0 + 400;
+  for (let i = 0; i < NT; i++) {
+    const t = i * DT;
+    const raw = lerp(X0 + 400, tabX[i] + 60, sstep(2.5, 12.5, t));
+    c += (raw - c) * (1 - Math.exp(-DT * 1.15));
+    tabCX[i] = c;
+  }
+})();
+
+/* ==========================================================================
+   Viewport
+   ========================================================================== */
+let W = 0, H = 0, DPR = 1, S = 1, portrait = false;
+let vignette = null, grain = null, grainPat = null;
+const CAM = { x: 0, y: -230, z: 1 };
+const CAM_Y0 = -230;
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  if (W * H * DPR * DPR > 3.6e6) DPR = Math.max(1, Math.sqrt(3.6e6 / (W * H)));
+  cvs.width = Math.round(W * DPR); cvs.height = Math.round(H * DPR);
+  portrait = H > W * 1.05;
+  S = Math.min(H / 900, W / 800);
+  buildVignette();
+}
+
+function buildVignette() {
+  vignette = document.createElement('canvas');
+  const vw = 320, vh = Math.max(64, Math.round(320 * H / W));
+  vignette.width = vw; vignette.height = vh;
+  const v = vignette.getContext('2d');
+  const g = v.createRadialGradient(vw / 2, vh * 0.48, Math.min(vw, vh) * 0.2, vw / 2, vh / 2, Math.hypot(vw, vh) * 0.56);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(0.6, 'rgba(12,9,6,0.22)');
+  g.addColorStop(1, 'rgba(8,6,4,0.78)');
+  v.fillStyle = g; v.fillRect(0, 0, vw, vh);
+  // dusty yellow-grey wash from above, darker toward the bottom
+  const w = v.createLinearGradient(0, 0, 0, vh);
+  w.addColorStop(0, 'rgba(120,104,66,0.16)'); w.addColorStop(0.55, 'rgba(120,104,66,0.04)'); w.addColorStop(1, 'rgba(16,12,8,0.28)');
+  v.fillStyle = w; v.fillRect(0, 0, vw, vh);
+  if (!grain) {
+    grain = document.createElement('canvas'); grain.width = grain.height = 180;
+    const gx = grain.getContext('2d'), id = gx.createImageData(180, 180), r = mulberry32(99);
+    for (let i = 0; i < id.data.length; i += 4) {
+      const c = r() * 255;
+      id.data[i] = id.data[i + 1] = id.data[i + 2] = c; id.data[i + 3] = 255;
+    }
+    gx.putImageData(id, 0, 0);
+    grainPat = ctx.createPattern(grain, 'repeat');
+  }
+}
+
+/* Layer transform: parallax factor p (x), pv (vertical). */
+function layerZ(p) { return 1 + (CAM.z - 1) * p; }
+function layerCY(pv) { return CAM_Y0 + (CAM.y - CAM_Y0) * pv; }
+function setLayer(p, pv) {
+  const z = layerZ(p), k = S * z * DPR;
+  ctx.setTransform(k, 0, 0, k, DPR * W / 2 - CAM.x * p * k, DPR * H / 2 - layerCY(pv) * k);
+}
+function visRange(p) {
+  const half = W / 2 / (S * layerZ(p));
+  return [CAM.x * p - half, CAM.x * p + half];
+}
+function screenOf(lx, ly, p, pv) {
+  const z = layerZ(p);
+  return [(lx - CAM.x * p) * S * z + W / 2, (ly - layerCY(pv)) * S * z + H / 2];
+}
+
+/* ==========================================================================
+   Sprites
+   ========================================================================== */
+function smokeSprite(seed, rgb, size = 256) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d'), r = mulberry32(seed), h = size / 2;
+  for (let i = 0; i < 26; i++) {
+    const a = r() * TAU, d = Math.pow(r(), 0.7) * size * 0.24;
+    const x = h + Math.cos(a) * d, y = h + Math.sin(a) * d * 0.8;
+    const rad = size * (0.12 + r() * 0.2);
+    const gr = g.createRadialGradient(x, y, 0, x, y, rad);
+    gr.addColorStop(0, `rgba(${rgb},0.17)`);
+    gr.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = gr; g.fillRect(0, 0, size, size);
+  }
+  return c;
+}
+function glowSprite(rgb, size = 128) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d'), h = size / 2;
+  const gr = g.createRadialGradient(h, h, 0, h, h, h);
+  gr.addColorStop(0, `rgba(${rgb},1)`);
+  gr.addColorStop(0.35, `rgba(${rgb},0.45)`);
+  gr.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = gr; g.fillRect(0, 0, size, size);
+  return c;
+}
+const SMK_D = [smokeSprite(1, '52,47,40'), smokeSprite(2, '60,55,46')];
+const SMK_M = [smokeSprite(3, '112,104,88'), smokeSprite(4, '120,110,92')];
+const SMK_L = [smokeSprite(5, '186,176,152'), smokeSprite(6, '176,166,142')];
+const GLOW_FIRE = glowSprite('214,112,46');
+const GLOW_ASH = glowSprite('222,214,196', 64);
+function blob(img, x, y, w, h, a) {
+  if (a <= 0.002) return;
+  ctx.globalAlpha = a;
+  ctx.drawImage(img, x - w / 2, y - h / 2, w, h);
+}
+
+/* ==========================================================================
+   Wind
+   ========================================================================== */
+const windAt = t => 0.55 + 0.3 * fbm(N5, t * 0.11, 3) + 0.55 * Math.max(0, N4(t * 0.065) - 0.15);
+const windDrift = t => t * 15 + 70 * N5(t * 0.045 + 3.3);
+
+/* ==========================================================================
+   Trees
+   ========================================================================== */
+/* Hierarchical tree with per-node sway; drawn as tapered filled quads. */
+function buildTree(seed, scale, hero) {
+  const rng = mulberry32(seed), nodes = [];
+  const node = (parent, ang, len, w0, w1, depth, broken) => {
+    const n = { parent, ang, len, w0, w1, depth, broken, ph: rng() * TAU, kids: [], tx: 0, ty: 0, ta: 0 };
+    nodes.push(n); if (parent) parent.kids.push(n); return n;
+  };
+  const grow = (parent, ang, len, w0, depth, maxD) => {
+    const w1 = Math.max(w0 * 0.6, 0.8 * scale);
+    const brk = depth > 1 && rng() < 0.16;
+    const kink = (rng() - 0.5) * 0.5, wm = (w0 + w1) / 2;
+    const half = node(parent, ang - kink * 0.5, len * 0.5, w0, wm, depth, false);
+    const n = node(half, kink, len * 0.5, wm, w1, depth, brk);
+    if (depth >= maxD || brk || len < 9 * scale) return n;
+    const k = rng() < 0.58 ? 2 : (rng() < 0.55 ? 1 : 3);
+    for (let i = 0; i < k; i++) {
+      const sp = k === 1 ? (rng() - 0.5) * 0.5 : (i % 2 ? 1 : -1) * (0.28 + rng() * 0.5) + (rng() - 0.5) * 0.2;
+      grow(n, sp, len * (0.6 + rng() * 0.2), w1 * (k === 1 ? 1 : 0.9), depth + 1, maxD);
+    }
+    return n;
+  };
+  const tl = hero ? [96, 88, 80, 66, 46] : [90, 80, 70, 52];
+  let p = null, w = (hero ? 46 : 40) * scale;
+  const trunk = [];
+  for (let i = 0; i < tl.length; i++) {
+    const ang = i === 0 ? -PI / 2 + (hero ? -0.05 : (rng() - 0.5) * 0.16) : (rng() - 0.5) * 0.26;
+    const w1 = w * 0.8;
+    const n = node(p, ang, tl[i] * scale, w, w1, i * 0.22, i === tl.length - 1);
+    trunk.push(n); p = n; w = w1;
+  }
+  if (hero) {
+    grow(trunk[0], -1.05, 34 * scale, trunk[0].w1 * 0.45, 2, 2);               // snapped stub
+    grow(trunk[1], 0.78, 160 * scale, trunk[1].w1 * 0.6, 1, 5);
+    grow(trunk[2], -0.9, 180 * scale, trunk[2].w1 * 0.62, 1, 5);
+    grow(trunk[3], 0.62, 130 * scale, trunk[3].w1 * 0.62, 1, 5);
+    grow(trunk[3], -0.42, 100 * scale, trunk[3].w1 * 0.52, 2, 5);
+    grow(trunk[4], 0.25, 70 * scale, trunk[4].w1 * 0.6, 2, 4);
+    grow(trunk[2], 1.25, 60 * scale, trunk[2].w1 * 0.4, 2, 4);
+    const hang = node(trunk[2], 2.35, 74 * scale, trunk[2].w1 * 0.36, trunk[2].w1 * 0.26, 2, true); // broken hanging limb
+    node(hang, 0.3, 26 * scale, hang.w1, hang.w1 * 0.7, 3, true);
+  } else {
+    for (let i = 1; i < trunk.length; i++) {
+      if (rng() < 0.75) grow(trunk[i], (rng() < 0.5 ? -1 : 1) * (0.5 + rng() * 0.5), (60 + rng() * 60) * scale, trunk[i].w1 * 0.55, 1, 4);
+    }
+  }
+  return { nodes, root: nodes[0] };
+}
+
+function drawTree(tr, bx, by, t, wind, fill, lit, sway = 1) {
+  ctx.beginPath();
+  const hl = lit ? new Path2D() : null;
+  const rec = (n, x, y, pa) => {
+    const d = n.depth;
+    const a = pa + n.ang + sway * wind * ((0.0022 + d * 0.0065) * Math.sin(t * (1.3 + d * 0.25) + n.ph) + 0.003 * d);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const ex = x + ca * n.len, ey = y + sa * n.len;
+    const nx = -sa, ny = ca, h0 = n.w0 / 2, h1 = n.w1 / 2;
+    ctx.moveTo(x + nx * h0, y + ny * h0);
+    ctx.lineTo(ex + nx * h1, ey + ny * h1);
+    if (n.broken && !n.kids.length) {
+      ctx.lineTo(ex + ca * h1 * 0.8 + nx * h1 * 0.3, ey + sa * h1 * 0.8 + ny * h1 * 0.3);
+      ctx.lineTo(ex + ca * h1 * 0.1 - nx * h1 * 0.1, ey + sa * h1 * 0.1 - ny * h1 * 0.1);
+      ctx.lineTo(ex + ca * h1 * 1.6 - nx * h1 * 0.5, ey + sa * h1 * 1.6 - ny * h1 * 0.5);
+    }
+    ctx.lineTo(ex - nx * h1, ey - ny * h1);
+    ctx.lineTo(x - nx * h0, y - ny * h0);
+    ctx.closePath();
+    if (n.parent) { ctx.moveTo(x + h0, y); ctx.arc(x, y, h0, 0, TAU, true); }
+    else {          // flared base where the trunk meets the ground
+      ctx.moveTo(x + h0 * 2.1, y + 3);
+      ctx.quadraticCurveTo(x + h0 * 0.9, y - 1, x + h0 * 0.85, y - h0 * 2.2);
+      ctx.lineTo(x - h0 * 0.85, y - h0 * 2.2);
+      ctx.quadraticCurveTo(x - h0 * 0.9, y - 1, x - h0 * 2.1, y + 3);
+      ctx.closePath();
+    }
+    if (hl && d < 2.2) {
+      hl.moveTo(x - nx * h0 * 0.62, y - ny * h0 * 0.62);
+      hl.lineTo(ex - nx * h1 * 0.62, ey - ny * h1 * 0.62);
+    }
+    n.tx = ex; n.ty = ey; n.ta = a;
+    for (const k of n.kids) rec(k, ex, ey, a);
+  };
+  rec(tr.root, bx, by, 0);
+  ctx.fillStyle = fill; ctx.fill();
+  if (hl) {
+    ctx.strokeStyle = lit; ctx.lineCap = 'round';
+    ctx.lineWidth = 3.2 * (tr.root.w0 / 46); ctx.stroke(hl);
+  }
+}
+
+/* Static far-tree silhouettes, batched by stroke width */
+function addStrokeTree(buckets, rng, x, y, h, lean) {
+  const br = (x, y, a, len, w, d) => {
+    const ex = x + Math.cos(a) * len, ey = y + Math.sin(a) * len;
+    const key = Math.max(0.35, Math.round(w * 4) / 4);
+    let p = buckets.get(key); if (!p) { p = new Path2D(); buckets.set(key, p); }
+    p.moveTo(x, y); p.lineTo(ex, ey);
+    if (d >= 4 || len < 2.5 || (d > 0 && rng() < 0.13)) return;
+    const k = rng() < 0.62 ? 2 : 1;
+    for (let i = 0; i < k; i++) {
+      const sp = k === 1 ? (rng() - 0.5) * 0.5 : (i ? 1 : -1) * (0.3 + rng() * 0.5);
+      br(ex, ey, a + sp, len * (0.58 + rng() * 0.2), w * 0.62, d + 1);
+    }
+  };
+  if (rng() < 0.18) { // snapped trunk only
+    const w = h * 0.08;
+    br(x, y, -PI / 2 + lean, h * (0.3 + rng() * 0.25), w, 4);
+  } else br(x, y, -PI / 2 + lean, h * 0.42, h * 0.07, 0);
+}
+
+/* ==========================================================================
+   Landscape layers (back to front)
+   ========================================================================== */
+const XL = -2900, XR = 3700;
+const LAYERS = [
+  { seed: 3, p: 0.07, pv: 0.32, base: -165, amp: 270, freq: 0.0019, oct: 5, ridge: true, top: '#8f856a', bot: '#978c70', fog: 0.42, step: 9 },
+  { seed: 5, p: 0.16, pv: 0.42, base: -150, amp: 92, freq: 0.0031, oct: 4, top: '#7e765e', bot: '#867e65', fog: 0.36, step: 8, trees: [170, 12, 28] },
+  { seed: 8, p: 0.3, pv: 0.55, base: -118, amp: 88, freq: 0.0027, oct: 4, top: '#716a56', bot: '#77705b', fog: 0.32, step: 7, trees: [95, 26, 60] },
+  { seed: 13, p: 0.55, pv: 0.72, base: -46, amp: 74, freq: 0.0023, oct: 4, top: '#5f594c', bot: '#655f51', fog: 0.3, step: 6, sway: 34 },
+];
+for (const L of LAYERS) {
+  const n = makeNoise(L.seed);
+  L.h = x => {
+    const f = fbm(n, x * L.freq, L.oct);
+    const v = L.ridge ? Math.pow(1 - Math.abs(f * 1.25), 2) : 0.5 + 0.5 * f * 1.4;
+    return L.base - L.amp * (L.ridge ? 0.18 + 0.82 * v : clamp(v, 0, 1));
+  };
+  const path = new Path2D();
+  path.moveTo(XL, 5000);
+  for (let x = XL; x <= XR; x += L.step) path.lineTo(x, L.h(x));
+  path.lineTo(XR, 5000); path.closePath();
+  L.path = path;
+  const g = ctx.createLinearGradient(0, L.base - L.amp, 0, L.base + 40);
+  g.addColorStop(0, L.top); g.addColorStop(1, L.bot);
+  L.grad = g;
+  const fg = ctx.createLinearGradient(0, L.base - L.amp * 0.55, 0, L.base + 70);
+  fg.addColorStop(0, 'rgba(168,153,116,0)');
+  fg.addColorStop(1, `rgba(168,153,116,${L.fog})`);
+  L.fogGrad = fg;
+  const rng = mulberry32(L.seed * 7 + 1);
+  if (L.trees) {
+    const buckets = new Map();
+    const [cnt, h0, h1] = L.trees;
+    for (let i = 0; i < cnt; i++) {
+      const x = XL + rng() * (XR - XL);
+      // clumps: favour some stretches
+      if (fbm(n, x * 0.004 + 9, 2) < -0.15 && rng() < 0.7) continue;
+      addStrokeTree(buckets, rng, x, L.h(x) + 2, lerp(h0, h1, rng()), (rng() - 0.5) * 0.25);
+    }
+    L.buckets = [...buckets.entries()].sort((a, b) => b[0] - a[0]);
+  }
+  if (L.sway) {
+    L.swayTrees = [];
+    for (let i = 0; i < L.sway; i++) {
+      const x = XL + rng() * (XR - XL);
+      L.swayTrees.push({ x, y: L.h(x) + 4, tree: buildTree(500 + i, 0.16 + rng() * 0.2, false), ph: rng() * TAU });
+    }
+  }
+}
+
+/* Distant smoke columns rising from still-burning forests */
+const COLUMNS = [
+  { x: -620, y: -172, s: 1.0, ph: 0.1 },
+  { x: 260, y: -176, s: 1.35, ph: 0.55 },
+  { x: 980, y: -168, s: 0.8, ph: 0.3 },
+];
+/* High dust strata in the sky */
+const SKYCLOUDS = (() => {
+  const r = mulberry32(77), a = [];
+  for (let i = 0; i < 18; i++) a.push({ x: -900 + r() * 2900, y: -1080 + r() * 640, w: 520 + r() * 640, h: 0.22 + r() * 0.14, a: 0.16 + r() * 0.2, dark: r() < 0.55, k: r() < 0.5 ? 0 : 1, sp: 3 + r() * 6 });
+  return a;
+})();
+/* Drifting smoke banks between hill layers */
+const BANKS = (() => {
+  const r = mulberry32(88), a = [];
+  for (let i = 0; i < 22; i++) {
+    const li = 1 + (i % 3);
+    a.push({ li, x: r() * 5200, y: LAYERS[li].base - 20 - r() * 70, w: 380 + r() * 420, h: 0.26 + r() * 0.12, a: 0.12 + r() * 0.12, sp: 6 + r() * 10, k: r() < 0.5 ? 0 : 1, dark: r() < 0.4 });
+  }
+  return a;
+})();
+/* Low smoke wisps crossing the ground plane */
+const WISPS = (() => {
+  const r = mulberry32(91), a = [];
+  for (let i = 0; i < 9; i++) a.push({ x: r() * 4600, y: -70 + r() * 110, w: 420 + r() * 380, a: 0.06 + r() * 0.06, sp: 9 + r() * 9, k: r() < 0.5 ? 0 : 1 });
+  return a;
+})();
+
+/* ==========================================================================
+   Ground plane (p = 1)
+   ========================================================================== */
+const GROUND_TOP = x => -27 + 5 * fbm(N3, x * 0.006, 3);
+const GROUND_PATH = (() => {
+  const p = new Path2D(); p.moveTo(XL, 5000);
+  for (let x = XL; x <= XR; x += 8) p.lineTo(x, GROUND_TOP(x));
+  p.lineTo(XR, 5000); p.closePath(); return p;
+})();
+const GROUND_GRAD = (() => {
+  const g = ctx.createLinearGradient(0, -30, 0, 620);
+  g.addColorStop(0, '#8d8678'); g.addColorStop(0.08, '#787266'); g.addColorStop(0.35, '#57524a');
+  g.addColorStop(0.7, '#3d3934'); g.addColorStop(1, '#2b2825');
+  return g;
+})();
+const GROUND_HAZE = (() => {
+  const g = ctx.createLinearGradient(0, -110, 0, 18);
+  g.addColorStop(0, 'rgba(170,156,120,0)'); g.addColorStop(0.62, 'rgba(170,156,120,0.32)'); g.addColorStop(1, 'rgba(170,156,120,0)');
+  return g;
+})();
+const CHUNKS = (() => {
+  const r = mulberry32(5150), out = [];
+  for (let cx = XL; cx < XR; cx += 400) {
+    const dark = new Path2D(), light = new Path2D(), crack = new Path2D();
+    for (let k = 0; k < 150; k++) {
+      const x = cx + r() * 400, yy = Math.pow(r(), 1.5), y = -24 + yy * 560;
+      const s = 0.5 + yy * 4.2;
+      const rx = s * (0.8 + r()), ry = rx * (0.3 + r() * 0.25);
+      if (r() < 0.55) { dark.moveTo(x + rx, y); dark.ellipse(x, y, rx, ry, 0, 0, TAU); }
+      else { light.moveTo(x + rx, y); light.ellipse(x, y, rx, ry * 0.8, 0, 0, TAU); }
+    }
+    for (let k = 0; k < 7; k++) {
+      let x = cx + r() * 400, y = -14 + Math.pow(r(), 1.3) * 300;
+      const sc = 0.4 + (y + 14) / 300 * 1.4;
+      crack.moveTo(x, y);
+      const segs = 3 + (r() * 4 | 0);
+      for (let s = 0; s < segs; s++) { x += (8 + r() * 20) * sc * (r() < 0.5 ? -1 : 1); y += (r() - 0.5) * 4 * sc; crack.lineTo(x, y); }
+    }
+    out.push({ x: cx, dark, light, crack });
+  }
+  return out;
+})();
+function makeRock(r, x, y, s) {
+  const pts = [], n = 7 + (r() * 4 | 0);
+  for (let i = 0; i < n; i++) {
+    const a = PI + (i / (n - 1)) * PI;               // upper half outline
+    const rr = s * (0.75 + r() * 0.4);
+    pts.push([x + Math.cos(a) * rr * 1.35, y + Math.sin(a) * rr * (0.7 + r() * 0.3)]);
+  }
+  pts.push([x + s * 1.3, y + s * 0.12], [x - s * 1.3, y + s * 0.12]);
+  const p = crPath(pts, true);
+  const g = ctx.createLinearGradient(0, y - s, 0, y + s * 0.2);
+  g.addColorStop(0, '#8b8579'); g.addColorStop(0.35, '#55504a'); g.addColorStop(1, '#2d2a26');
+  return { p, g, x, s };
+}
+const ROCKS_BACK = [], ROCKS_FRONT = [], STUMPS = [];
+(() => {
+  const r = mulberry32(4242);
+  for (let i = 0; i < 46; i++) {
+    const x = XL + r() * (XR - XL);
+    if (Math.abs(x - TREE_X) < 120) continue;
+    ROCKS_BACK.push(makeRock(r, x, -22 + r() * 13, 3 + r() * 9));
+  }
+  for (let i = 0; i < 34; i++) {
+    const x = XL + r() * (XR - XL), y = 30 + Math.pow(r(), 1.3) * 230;
+    ROCKS_FRONT.push(makeRock(r, x, y, (5 + r() * 12) * (0.6 + y / 160)));
+  }
+  for (let i = 0; i < 16; i++) {
+    const x = XL + r() * (XR - XL);
+    if (Math.abs(x - TREE_X) < 200) continue;
+    STUMPS.push({ x, y: -18 + r() * 8, w: 9 + r() * 12, h: 14 + r() * 40, j: r() });
+  }
+})();
+const GROUND_TREES = [
+  { x: -1380, y: -21, tree: buildTree(31, 0.62, false) },
+  { x: -560, y: -23, tree: buildTree(32, 0.4, false) },
+  { x: 2050, y: -20, tree: buildTree(34, 0.7, false) },
+  { x: 2720, y: -22, tree: buildTree(35, 0.5, false) },
+];
+const HERO = buildTree(9, 1.0, true);
+const TREE_BASE_Y = -15;
+/* the one withered leaf still clinging to the hero tree */
+let LEAF_NODE = null;
+(() => {
+  let best = 1e9;
+  drawTreeRest(HERO);
+  for (const n of HERO.nodes) {
+    if (n.kids.length || n.broken) continue;
+    const dx = n.tx - (TREE_X + 70), dy = n.ty - (-320);
+    const d = Math.hypot(dx, dy);
+    if (d < best) { best = d; LEAF_NODE = n; }
+  }
+})();
+function drawTreeRest(tr) {
+  const rec = (n, x, y, pa) => {
+    const a = pa + n.ang, ex = x + Math.cos(a) * n.len, ey = y + Math.sin(a) * n.len;
+    n.tx = ex; n.ty = ey; n.ta = a;
+    for (const k of n.kids) rec(k, ex, ey, a);
+  };
+  rec(tr.root, TREE_X, TREE_BASE_Y, 0);
+}
+/* Roots of the hero tree */
+const HERO_ROOTS = (() => {
+  const p = new Path2D(), bx = TREE_X, by = TREE_BASE_Y;
+  const roots = [[-1, 78, 9], [-1, 44, 7], [1, 70, 8], [1, 36, 6], [-1, 24, 5]];
+  for (const [d, len, w] of roots) {
+    p.moveTo(bx + d * 6, by - 26);
+    p.quadraticCurveTo(bx + d * (len * 0.3), by - w * 0.6, bx + d * len, by + 2 + (len % 7) * 0.4);
+    p.quadraticCurveTo(bx + d * len * 0.35, by + w * 0.5, bx - d * 8, by + 2);
+    p.closePath();
+  }
+  return p;
+})();
+/* Skeleton of an earlier victim, half-buried in ash */
+const SKEL_X = X0 + 700, SKEL_Y = -17;
+const SKELETON = (() => {
+  const p = new Path2D(), x = SKEL_X, y = SKEL_Y;
+  p.moveTo(x - 120, y + 2); p.quadraticCurveTo(x - 40, y - 22, x + 40, y - 18); p.quadraticCurveTo(x + 75, y - 14, x + 96, y - 4);
+  for (let i = 0; i < 9; i++) {
+    const rx = x - 26 + i * 9, top = y - 20 + Math.abs(i - 4) * 0.6;
+    p.moveTo(rx, top); p.quadraticCurveTo(rx - 9, top + 6, rx - 4 + (i % 2), y + 1);
+  }
+  for (let i = 0; i < 13; i++) { const vx = x - 118 + i * 7; p.moveTo(vx, y + 1 - i * 0.6); p.lineTo(vx + 2, y - 4 - i * 0.6); }
+  return p;
+})();
+const SKULL_REM = (() => {
+  const p = new Path2D(), x = SKEL_X + 104, y = SKEL_Y;
+  p.moveTo(x - 6, y - 6); p.quadraticCurveTo(x + 14, y - 16, x + 34, y - 6); p.lineTo(x + 36, y + 1); p.quadraticCurveTo(x + 14, y + 3, x - 6, y + 1); p.closePath();
+  return p;
+})();
+
+/* Foreground silhouettes (p = 1.32) */
+const FG = (() => {
+  const r = mulberry32(6060), n = makeNoise(606);
+  const top = x => 168 + 30 * fbm(n, x * 0.004, 3);
+  const ground = new Path2D(); ground.moveTo(XL * 1.4, 5000);
+  for (let x = XL * 1.4; x <= XR * 1.4; x += 10) ground.lineTo(x, top(x));
+  ground.lineTo(XR * 1.4, 5000); ground.closePath();
+  const rocks = [];
+  for (let i = 0; i < 26; i++) {
+    const x = XL * 1.4 + r() * (XR - XL) * 1.4, s = 18 + r() * 34;
+    const pts = [], m = 8;
+    for (let k = 0; k < m; k++) { const a = PI + k / (m - 1) * PI; pts.push([x + Math.cos(a) * s * 1.5, top(x) + 6 + Math.sin(a) * s * (0.6 + r() * 0.5)]); }
+    pts.push([x + s * 1.5, top(x) + 20], [x - s * 1.5, top(x) + 20]);
+    rocks.push(crPath(pts, true));
+  }
+  const ferns = [];
+  for (let i = 0; i < 22; i++) {
+    const x = XL * 1.4 + r() * (XR - XL) * 1.4;
+    const p = new Path2D(), cnt = 3 + (r() * 4 | 0);
+    for (let f = 0; f < cnt; f++) {
+      const len = 50 + r() * 90, lean = (r() - 0.5) * 1.3, curl = (r() < 0.5 ? -1 : 1) * (0.4 + r() * 0.6);
+      let px = 0, py = 0, a = -PI / 2 + lean;
+      const segs = 9;
+      p.moveTo(0, 0);
+      for (let s = 0; s < segs; s++) {
+        a += curl * 0.11; const L = len / segs;
+        const nx = px + Math.cos(a) * L, ny = py + Math.sin(a) * L;
+        p.lineTo(nx, ny);
+        if (s > 1 && r() < 0.75) {       // burnt pinnae, many missing
+          const ll = (1 - s / segs) * 14 + 3;
+          p.moveTo(nx, ny); p.lineTo(nx + Math.cos(a - 1.1) * ll, ny + Math.sin(a - 1.1) * ll);
+          if (r() < 0.6) { p.moveTo(nx, ny); p.lineTo(nx + Math.cos(a + 1.1) * ll, ny + Math.sin(a + 1.1) * ll); }
+          p.moveTo(nx, ny);
+        }
+        px = nx; py = ny;
+      }
+    }
+    ferns.push({ x, y: top(x) + 8, p, ph: r() * TAU, s: 0.8 + r() * 0.6 });
+  }
+  return { ground, rocks, ferns, top };
+})();
+
+/* ==========================================================================
+   Triceratops — geometry
+   ========================================================================== */
+const HS = 0.84;   // head scale
+const BODY_PTS = [[-100, -22], [-62, -40], [-24, -55], [8, -50], [52, -47], [102, -40], [146, -31], [176, -29], [204, -16], [222, 8], [215, 40], [190, 62], [140, 74], [84, 76], [28, 72], [-18, 64], [-58, 48], [-90, 30], [-108, 8]];
+const BELLY = [[10, 0.25], [11, 0.55], [12, 1], [13, 1], [14, 0.8], [15, 0.45]];
+const BODY_GRAD = (() => {
+  const g = ctx.createLinearGradient(0, -58, 0, 82);
+  g.addColorStop(0, '#6d675a'); g.addColorStop(0.3, '#595347'); g.addColorStop(0.66, '#433e35'); g.addColorStop(1, '#2d2a24');
+  return g;
+})();
+const BODY_SHADE = (() => {   // darker toward tail and chest edges: lit from upper left
+  const g = ctx.createLinearGradient(-110, 0, 225, 0);
+  g.addColorStop(0, 'rgba(25,22,18,0.25)'); g.addColorStop(0.3, 'rgba(25,22,18,0)'); g.addColorStop(0.85, 'rgba(25,22,18,0)'); g.addColorStop(1, 'rgba(25,22,18,0.22)');
+  return g;
+})();
+const ASH_TOP = (() => {
+  const g = ctx.createLinearGradient(0, -58, 0, -10);
+  g.addColorStop(0, 'rgba(178,170,152,0.42)'); g.addColorStop(1, 'rgba(178,170,152,0)');
+  return g;
+})();
+const SCALES = (() => {
+  const r = mulberry32(321), dark = new Path2D(), light = new Path2D(), tub = new Path2D(), tubHi = new Path2D();
+  for (let i = 0; i < 420; i++) {
+    const x = -112 + r() * 340, y = -60 + r() * 150, rr = 1.4 + r() * 2.4;
+    const p = r() < 0.62 ? dark : light;
+    p.moveTo(x + rr, y); p.ellipse(x, y, rr, rr * 0.78, r() * PI, 0, TAU);
+  }
+  for (let i = 0; i < 46; i++) {
+    const x = -95 + r() * 300, y = -46 + r() * 70, rr = 3.4 + r() * 3.6;
+    tub.moveTo(x + rr, y); tub.ellipse(x, y, rr, rr * 0.85, 0, 0, TAU);
+    tubHi.moveTo(x - rr * 0.25 + rr * 0.5, y - rr * 0.3); tubHi.ellipse(x - rr * 0.25, y - rr * 0.3, rr * 0.5, rr * 0.35, 0, 0, TAU);
+  }
+  const speck = new Path2D();
+  for (let i = 0; i < 160; i++) {
+    const x = -105 + r() * 330, y = -58 + Math.pow(r(), 1.8) * 70, rr = 0.6 + r() * 1.3;
+    speck.moveTo(x + rr, y); speck.ellipse(x, y, rr, rr * 0.7, 0, 0, TAU);
+  }
+  return { dark, light, tub, tubHi, speck };
+})();
+const topY = x => {   // body top line (for spine bumps)
+  for (let i = 0; i < 8; i++) {
+    const a = BODY_PTS[i], b = BODY_PTS[i + 1];
+    if (x >= a[0] && x <= b[0]) return lerp(a[1], b[1], (x - a[0]) / (b[0] - a[0]));
+  }
+  return -20;
+};
+
+/* Head (local coords, x toward beak, y down) */
+const SKULL_PTS = [[22, -30], [48, -31], [76, -25], [100, -17], [118, -12], [132, -5], [142, 6], [148, 18], [146, 30], [136, 34], [124, 42], [100, 46], [72, 44], [48, 42], [34, 46], [20, 40], [8, 28], [0, 12], [4, -8], [12, -22]];
+const SKULL = crPath(SKULL_PTS, true);
+const FRILL_PTS = [[34, -28], [18, -50], [-4, -74], [-32, -95], [-64, -108], [-96, -106], [-119, -90], [-127, -64], [-117, -36], [-95, -12], [-66, 6], [-36, 18], [-10, 20], [8, 8]];
+const FRILL = (() => {
+  const s = crSample(FRILL_PTS, true, 14), p = new Path2D();
+  let arc = 0, prev = null;
+  s.forEach((q, i) => {
+    if (prev) arc += Math.hypot(q[0] - prev[0], q[1] - prev[1]);
+    prev = q;
+    let x = q[0], y = q[1];
+    if (q[2] >= 1 && q[2] <= 9) {
+      const cx = -56, cy = -48, dx = x - cx, dy = y - cy, dl = Math.hypot(dx, dy);
+      const b = Math.pow(Math.abs(Math.sin(PI * arc / 17)), 0.8) * 4.2;
+      x += dx / dl * b; y += dy / dl * b;
+    }
+    i ? p.lineTo(x, y) : p.moveTo(x, y);
+  });
+  p.closePath(); return p;
+})();
+const FRILL_VEINS = (() => {
+  const p = new Path2D(), r = mulberry32(17);
+  for (let i = 0; i < 15; i++) {
+    const a = -2.95 + i * 0.12 + (r() - 0.5) * 0.08;
+    const x0 = 8 + Math.cos(a) * 18, y0 = -8 + Math.sin(a) * 18;
+    const len = 70 + r() * 30;
+    const x1 = x0 + Math.cos(a) * len, y1 = y0 + Math.sin(a) * len;
+    p.moveTo(x0, y0);
+    p.quadraticCurveTo((x0 + x1) / 2 + (r() - 0.5) * 18, (y0 + y1) / 2 + (r() - 0.5) * 18, x1, y1);
+  }
+  return p;
+})();
+const FRILL_GRAD = (() => {
+  const g = ctx.createRadialGradient(-20, -30, 6, -50, -52, 100);
+  g.addColorStop(0, '#433b31'); g.addColorStop(0.6, '#56493b'); g.addColorStop(1, '#665746');
+  return g;
+})();
+const SKULL_GRAD = (() => {
+  const g = ctx.createLinearGradient(0, -34, 0, 50);
+  g.addColorStop(0, '#726b5e'); g.addColorStop(0.45, '#585246'); g.addColorStop(1, '#38332c');
+  return g;
+})();
+const HORN = (() => { const p = new Path2D(); p.moveTo(46, -25); p.quadraticCurveTo(86, -60, 140, -101); p.quadraticCurveTo(94, -50, 74, -23); p.closePath(); return p; })();
+const HORN_GRAD = (() => {
+  const g = ctx.createLinearGradient(60, -26, 140, -100);
+  g.addColorStop(0, '#5e5749'); g.addColorStop(0.45, '#9a8f77'); g.addColorStop(1, '#c4b99d');
+  return g;
+})();
+const NASAL = (() => { const p = new Path2D(); p.moveTo(105, -15); p.quadraticCurveTo(109, -31, 117, -43); p.quadraticCurveTo(119, -28, 125, -9); p.closePath(); return p; })();
+const BEAK = (() => {
+  const p = new Path2D(); p.moveTo(126, -7); p.quadraticCurveTo(145, 2, 151, 16); p.quadraticCurveTo(156, 29, 151, 37);
+  p.quadraticCurveTo(147, 31, 140, 30); p.quadraticCurveTo(135, 14, 126, -7); p.closePath(); return p;
+})();
+const PREDENT = (() => { const p = new Path2D(); p.moveTo(140, 31); p.quadraticCurveTo(142, 40, 133, 45); p.lineTo(122, 44); p.quadraticCurveTo(131, 38, 140, 31); p.closePath(); return p; })();
+const JUGAL = (() => { const p = new Path2D(); p.moveTo(28, 37); p.quadraticCurveTo(24, 50, 17, 61); p.quadraticCurveTo(33, 54, 43, 39); p.closePath(); return p; })();
+const HEAD_TEX = (() => {
+  const r = mulberry32(55), d = new Path2D(), l = new Path2D();
+  for (let i = 0; i < 120; i++) {
+    const x = 6 + r() * 142, y = -30 + r() * 76, rr = 1 + r() * 2;
+    const p = r() < 0.6 ? d : l;
+    p.moveTo(x + rr, y); p.ellipse(x, y, rr, rr * 0.75, 0, 0, TAU);
+  }
+  for (let i = 0; i < 70; i++) {
+    const a = r() * TAU, rad = r() * 78;
+    const x = -42 + Math.cos(a) * rad, y = -48 + Math.sin(a) * rad * 0.9, rr = 1 + r() * 2.2;
+    d.moveTo(x + rr, y); d.ellipse(x, y, rr, rr * 0.8, 0, 0, TAU);
+  }
+  return { d, l };
+})();
+const WRINKLES = (() => {
+  const p = new Path2D();
+  p.moveTo(46, -4); p.quadraticCurveTo(52, 16, 40, 32);
+  p.moveTo(54, 4); p.quadraticCurveTo(60, 18, 52, 34);
+  p.moveTo(76, 4); p.quadraticCurveTo(92, 10, 110, 8);
+  p.moveTo(14, -4); p.quadraticCurveTo(22, 12, 16, 30);
+  p.moveTo(6, 4); p.quadraticCurveTo(12, 16, 8, 26);
+  return p;
+})();
+const HEAD_KEYS = [[153, 35], [133, 45], [100, 46], [72, 44], [48, 42], [34, 46], [17, 61], [-62, 16], [-86, 0], [-36, 24], [0, 14]];
+const EYE = [62, -8];
+
+const LEGS = [
+  { hind: true, far: true, off: 0.5, base: 8, lie: -6, attach: [6, -2] },
+  { hind: false, far: true, off: 0.25, base: 188, lie: 202, attach: [182, 24] },
+  { hind: true, far: false, off: 0, base: 8, lie: -18, attach: [0, 6] },
+  { hind: false, far: false, off: 0.75, base: 188, lie: 186, attach: [176, 30] },
+];
+const DUTY = 0.75;
+function gaitFoot(phase, off, L, lift) {
+  const q = frac(phase + off);
+  if (q < DUTY) return [L * (0.5 - q / DUTY), 0, 0];
+  const s = (q - DUTY) / (1 - DUTY);
+  return [L * (-0.5 + sm(s)), Math.sin(PI * s) * lift, s];
+}
+const COL_NEAR = { base: '#4f493e', light: '#575145', dark: '#35312a', foot: '#5a554a', claw: '#867e6e', line: 'rgba(24,21,18,0.35)' };
+const COL_FAR = { base: '#36322c', light: '#3d3933', dark: '#26231f', foot: '#3e3a34', claw: '#55504a', line: 'rgba(16,14,12,0.3)' };
+
+/* Footprints and dust puffs (deterministic events) */
+const PRINTS = [];
+(() => {
+  const L = STRIDE * DUTY;
+  for (const lg of LEGS) {
+    let prevK = Math.floor((0 + lg.off));
+    for (let i = 1; i < NT; i++) {
+      const ph = (tabX[i] - X0) / STRIDE + lg.off;
+      const k = Math.floor(ph);
+      if (k !== prevK) {
+        const t = i * DT;
+        PRINTS.push({ t, x: tabX[i] + lg.base + L / 2 + (lg.far ? 12 : 0), y: lg.far ? -6 : 1, hind: lg.hind, far: lg.far });
+        prevK = k;
+      }
+    }
+  }
+})();
+const PUFFS = PRINTS.map(p => ({ t: p.t, x: p.x + (p.hind ? 10 : 6), y: p.y, s: p.far ? 0.6 : 0.9 }));
+for (const ts of STUM) PUFFS.push({ t: ts + 0.1, x: tabX[Math.round(ts / DT)] + 200, y: 0, s: 2.0 });
+PUFFS.push({ t: 43.8, x: ROOT_END + 190, y: 0, s: 2.6 }, { t: 46.5, x: ROOT_END + 40, y: 2, s: 3.6 }, { t: 46.7, x: ROOT_END - 90, y: 0, s: 2.2 }, { t: 58.5, x: ROOT_END + 300, y: 0, s: 1.6 });
+
+/* ==========================================================================
+   Triceratops — pose
+   ========================================================================== */
+function computeDino(t) {
+  const rootX = samp(tabX, t), v = samp(tabV, t), w = clamp(v / 36, 0, 1);
+  const phase = (rootX - X0) / STRIDE;
+  const alive = t < T_DEATH;
+  const bph = samp(tabB, t);
+  const breath = alive ? breathAmp(t) * (0.5 - 0.5 * Math.cos(TAU * bph)) : 0;
+  const tr = tremAmp(t);
+  const trn = k => Math.sin(t * 71.3 + k) * 0.5 + Math.sin(t * 53.7 + k * 2.1) * 0.3 + Math.sin(t * 97.1 + k * 3.7) * 0.2;
+  let sk = 0; for (const s of STUM) sk = Math.max(sk, stumbleK(t, s));
+  const bob = 0.5 - 0.5 * Math.cos(TAU * 2 * phase);
+  const hipH = hipTrack(t) - 2.6 * bob * w - 7 * sk + breath * 1.3 + tr * trn(1);
+  const shH = shTrack(t) - 2.4 * (0.5 - 0.5 * Math.cos(TAU * 2 * (phase + 0.25))) * w - 30 * sk + breath * 1.8 + tr * trn(2) * 1.2;
+  const th = Math.asin(clamp((hipH - shH - 30) / 181, -0.6, 0.6));
+  const c = Math.cos(th), s = Math.sin(th), by = -hipH;
+  const toW = (lx, ly) => [rootX + lx * c - ly * s, by + lx * s + ly * c];
+
+  const L = STRIDE * DUTY, energy = lerp(1, 0.6, clamp(t / 30, 0, 1));
+  const kh = sstep(38.8, 46.6, t), kf = sstep(42.9, 44.9, t);
+  const legs = LEGS.map(lg => {
+    let [rel, lift, sw] = gaitFoot(phase, lg.off, L, (lg.hind ? 15 : 13) * energy * (0.3 + 0.7 * w));
+    let fx = rootX + lg.base + rel + (lg.far ? 12 : 0);
+    const gy = lg.far ? -7 : 0;
+    let ah = lg.hind ? 16 : 12;
+    const k = lg.hind ? kh : kf;
+    if (k > 0) { fx = lerp(fx, rootX + lg.lie + (lg.far ? 12 : 0), k); ah = lerp(ah, lg.hind ? 11 : 8, k); lift += Math.sin(PI * k) * 4; }
+    if (!lg.hind && !lg.far) fx += sk * 10;
+    const A = toW(lg.attach[0], lg.attach[1]);
+    const [l1, l2] = lg.hind ? [78, 66] : [64, 58];
+    const J = ik(A[0], A[1], fx, gy - ah - lift, l1, l2, lg.hind ? -1 : 1);
+    if (J[1] > gy - 7) J[1] = gy - 7;
+    return { lg, A, K: [J[0], J[1]], E: [J[2], J[3]], gy, rot: 0.42 * Math.sin(PI * sw) * w, far: lg.far, hind: lg.hind };
+  });
+
+  // head
+  const N = toW(205, -2); N[1] += neckDrop(t);
+  const wob = wobAmp(t) * (fbm(N1, t * 0.55, 2) * 1.6);
+  let ha = headTrack(t) + 3 * Math.sin(TAU * 2 * phase - 0.8) * w + 24 * sk + wob + tr * trn(3) * 0.5
+    - breath * (t > 46 && t < 58 ? 1.6 : 0.6);
+  ha *= DEG;
+  ha = clampHead(N, ha);
+
+  // tail
+  const tb = toW(-92, 2);
+  const tail = [tb], radii = [];
+  let a = PI + th - 0.1;
+  const dI = 0.022 + 0.022 * clamp(t / 30, 0, 1);
+  const tailLive = alive ? 1 : Math.max(0, 1 - (t - T_DEATH) * 0.6);
+  for (let i = 0; i < 9; i++) {
+    const sway = (Math.sin(t * 1.25 - i * 0.55) * 0.016 + Math.sin(TAU * phase - i * 0.45) * 0.025 * w) * tailLive;
+    a -= dI + sway;
+    const p = tail[i];
+    let nx = p[0] + Math.cos(a) * 22, ny = p[1] + Math.sin(a) * 22;
+    const r = 30 * Math.pow(1 - (i + 1) / 10, 1.45) + 1.5;
+    const lim = -3 - r * 0.72;
+    if (ny > lim) { ny = lim; a = Math.atan2(ny - p[1], nx - p[0]); }
+    tail.push([nx, ny]);
+  }
+  for (let i = 0; i <= 9; i++) radii.push(30 * Math.pow(1 - i / 10, 1.45) + 1.5);
+
+  return { t, rootX, hipH, shH, th, c, s, toW, legs, N, ha, tail, radii, breath, alive, phase, sk,
+    eye: eyeBase(t) * (1 - blinkAt(t)), ash: sstep(T_DEATH - 4, T_DEATH + 16, t) };
+}
+function clampHead(N, a) {
+  const G = 1.5;
+  const maxY = ang => {
+    const sa = Math.sin(ang), ca = Math.cos(ang);
+    let m = -1e9;
+    for (const p of HEAD_KEYS) { const y = N[1] + HS * (p[0] * sa + p[1] * ca); if (y > m) m = y; }
+    return m;
+  };
+  if (maxY(a) <= G) return a;
+  let lo = a - 1.4, hi = a;
+  if (maxY(lo) > G) return lo;
+  for (let i = 0; i < 20; i++) { const mid = (lo + hi) / 2; if (maxY(mid) > G) hi = mid; else lo = mid; }
+  return lo;
+}
+
+/* ==========================================================================
+   Triceratops — drawing
+   ========================================================================== */
+function drawShadow(D) {
+  const lying = sstep(40, 47, D.t);
+  const cx = D.rootX + 70 + lying * 20, rx = 250 - lying * 10, ry = 15 + lying * 9;
+  ctx.save(); ctx.translate(cx, 3); ctx.scale(1, ry / rx);
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+  const a = 0.28 + lying * 0.24;
+  g.addColorStop(0, `rgba(22,19,16,${a})`); g.addColorStop(0.6, `rgba(22,19,16,${a * 0.55})`); g.addColorStop(1, 'rgba(22,19,16,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, rx, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawLeg(L, col) {
+  const { A, K, E, hind } = L;
+  const thighW = hind ? 35 : 25, kneeW = hind ? 18 : 15, ankW = hind ? 12.5 : 10.5;
+  // upper limb: muscular ellipse
+  const mx = (A[0] + K[0]) / 2, my = (A[1] + K[1]) / 2;
+  const ang = Math.atan2(K[1] - A[1], K[0] - A[0]), len = Math.hypot(K[0] - A[0], K[1] - A[1]);
+  ctx.save(); ctx.translate(mx, my); ctx.rotate(ang);
+  const g = ctx.createRadialGradient(-len * 0.15, -thighW * 0.35, 2, 0, 0, len * 0.75);
+  g.addColorStop(0, col.light); g.addColorStop(0.55, col.base); g.addColorStop(1, col.dark);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.ellipse(-len * 0.04, 0, len / 2 + thighW * 0.38, thighW, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+  // lower limb
+  const dx = E[0] - K[0], dy = E[1] - K[1], dl = Math.hypot(dx, dy) || 1;
+  const nx = -dy / dl, ny = dx / dl;
+  ctx.fillStyle = col.base;
+  ctx.beginPath();
+  ctx.moveTo(K[0] + nx * kneeW, K[1] + ny * kneeW);
+  ctx.quadraticCurveTo((K[0] + E[0]) / 2 + nx * (kneeW + ankW) * 0.42, (K[1] + E[1]) / 2 + ny * (kneeW + ankW) * 0.42, E[0] + nx * ankW, E[1] + ny * ankW);
+  ctx.lineTo(E[0] - nx * ankW, E[1] - ny * ankW);
+  ctx.quadraticCurveTo((K[0] + E[0]) / 2 - nx * (kneeW + ankW) * 0.5, (K[1] + E[1]) / 2 - ny * (kneeW + ankW) * 0.5, K[0] - nx * kneeW, K[1] - ny * kneeW);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.arc(K[0], K[1], kneeW, 0, TAU); ctx.fill();
+  // skin folds at joint
+  ctx.strokeStyle = col.line; ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const px = K[0] + dx / dl * (6 + i * 7), py = K[1] + dy / dl * (6 + i * 7), ww = kneeW * (0.8 - i * 0.08);
+    ctx.moveTo(px + nx * ww, py + ny * ww); ctx.quadraticCurveTo(px + dx / dl * 3, py + dy / dl * 3, px - nx * ww, py - ny * ww);
+  }
+  ctx.stroke();
+  drawFoot(E[0], E[1], L.gy, L.rot, hind, col);
+}
+
+function drawFoot(ax, ay, gy, rot, hind, col) {
+  ctx.save(); ctx.translate(ax, ay); ctx.rotate(rot);
+  const h = Math.max(4, gy - ay);
+  ctx.fillStyle = col.foot;
+  ctx.beginPath();
+  if (hind) {
+    ctx.moveTo(-11, -5); ctx.quadraticCurveTo(-16, h * 0.55, -13, h); ctx.lineTo(28, h);
+    ctx.quadraticCurveTo(40, h, 38, h - 6); ctx.quadraticCurveTo(26, h - 13, 11, -3); ctx.closePath();
+  } else {
+    ctx.moveTo(-9, -4); ctx.quadraticCurveTo(-13, h * 0.6, -10, h); ctx.lineTo(20, h);
+    ctx.quadraticCurveTo(29, h, 27, h - 5); ctx.quadraticCurveTo(18, h - 10, 9, -3); ctx.closePath();
+  }
+  ctx.fill();
+  // blunt hoof-like claws
+  ctx.fillStyle = col.claw;
+  ctx.beginPath();
+  const cl = hind ? [[25, 4.2], [31, 4.4], [36.5, 4]] : [[16, 3.4], [21, 3.5], [25.5, 3.2]];
+  for (const [x, r] of cl) { ctx.moveTo(x + r, h - r * 0.4); ctx.ellipse(x, h - r * 0.45, r, r * 0.62, 0, 0, TAU); }
+  ctx.fill();
+  // ash dust on toes
+  ctx.fillStyle = 'rgba(165,158,142,0.18)';
+  ctx.fillRect(-14, h - 5, hind ? 52 : 40, 5);
+  ctx.restore();
+}
+
+function bodyPath(b) {
+  const pts = BODY_PTS.map(p => [p[0], p[1]]);
+  for (const [i, wgt] of BELLY) pts[i][1] += b * 7 * wgt;
+  pts[9][0] += b * 2.2; pts[10][0] += b * 1.5; pts[7][1] -= b * 1.2;
+  return crPath(pts, true);
+}
+
+function drawTail(D) {
+  const P = D.tail, R = D.radii, n = P.length;
+  const up = [], dn = [];
+  for (let i = 0; i < n; i++) {
+    const a = P[Math.max(0, i - 1)], b = P[Math.min(n - 1, i + 1)];
+    let dx = b[0] - a[0], dy = b[1] - a[1]; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+    const nx = -dy, ny = dx;
+    up.push([P[i][0] + nx * R[i], P[i][1] + ny * R[i]]);
+    dn.push([P[i][0] - nx * R[i], P[i][1] - ny * R[i]]);
+  }
+  const pts = up.concat([[P[n - 1][0] + (P[n - 1][0] - P[n - 2][0]) * 0.25, P[n - 1][1] + (P[n - 1][1] - P[n - 2][1]) * 0.25]], dn.reverse());
+  const path = crPath(pts, true);
+  const g = ctx.createLinearGradient(0, P[0][1] - 34, 0, P[0][1] + 34);
+  g.addColorStop(0, '#666053'); g.addColorStop(0.5, '#4f4a3f'); g.addColorStop(1, '#2f2c26');
+  ctx.fillStyle = g; ctx.fill(path);
+  ctx.save(); ctx.clip(path);
+  ctx.fillStyle = 'rgba(30,27,23,0.12)';
+  ctx.beginPath();
+  for (let i = 1; i < n - 1; i++) { const r = R[i] * 0.4; ctx.moveTo(P[i][0] + r, P[i][1] - R[i] * 0.3); ctx.ellipse(P[i][0], P[i][1] - R[i] * 0.3, r, r * 0.6, 0, 0, TAU); }
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(178,170,152,0.18)'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(up[0][0], up[0][1] + 2);
+  for (let i = 1; i < n; i++) ctx.lineTo(up[i][0], up[i][1] + 1.5);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBody(D) {
+  const b = D.breath;
+  ctx.save();
+  ctx.translate(D.rootX, -D.hipH); ctx.rotate(D.th);
+  const bp = bodyPath(b);
+  ctx.fillStyle = BODY_GRAD; ctx.fill(bp);
+  ctx.save(); ctx.clip(bp);
+  ctx.fillStyle = BODY_SHADE; ctx.fillRect(-120, -70, 360, 170);
+  // starvation: sunken flank behind the ribs, prominent hip bone
+  let g = ctx.createRadialGradient(8, 18, 4, 8, 18, 52);
+  g.addColorStop(0, 'rgba(24,21,17,0.38)'); g.addColorStop(1, 'rgba(24,21,17,0)');
+  ctx.fillStyle = g; ctx.fillRect(-60, -40, 130, 120);
+  g = ctx.createRadialGradient(-24, -40, 2, -24, -40, 30);
+  g.addColorStop(0, 'rgba(190,180,158,0.32)'); g.addColorStop(1, 'rgba(190,180,158,0)');
+  ctx.fillStyle = g; ctx.fillRect(-60, -70, 80, 60);
+  g = ctx.createRadialGradient(-20, -14, 2, -20, -14, 26);
+  g.addColorStop(0, 'rgba(24,21,17,0.3)'); g.addColorStop(1, 'rgba(24,21,17,0)');
+  ctx.fillStyle = g; ctx.fillRect(-50, -40, 60, 55);
+  // shoulder blade
+  g = ctx.createRadialGradient(150, -12, 2, 150, -12, 34);
+  g.addColorStop(0, 'rgba(180,170,148,0.18)'); g.addColorStop(1, 'rgba(180,170,148,0)');
+  ctx.fillStyle = g; ctx.fillRect(110, -50, 80, 80);
+  // ribs — show more on the exhale
+  const ribA = 0.2 - b * 0.06;
+  ctx.lineCap = 'round';
+  for (let pass = 0; pass < 2; pass++) {
+    ctx.strokeStyle = pass ? `rgba(176,166,144,${ribA * 0.45})` : `rgba(22,19,16,${ribA})`;
+    ctx.lineWidth = pass ? 1.8 : 3.6;
+    ctx.beginPath();
+    for (let i = 0; i < 7; i++) {
+      const x = 58 + i * 15 + b * 2.5 * (i / 7) + (pass ? -5 : 0);
+      ctx.moveTo(x + 9, -34 + i * 0.6);
+      ctx.quadraticCurveTo(x - 7, 12, x - 1 - i * 0.6, 56 + b * 4);
+    }
+    ctx.stroke();
+  }
+  // scales and tubercles
+  ctx.fillStyle = 'rgba(28,25,21,0.2)'; ctx.fill(SCALES.dark);
+  ctx.fillStyle = 'rgba(170,160,140,0.1)'; ctx.fill(SCALES.light);
+  ctx.fillStyle = 'rgba(30,27,23,0.14)'; ctx.fill(SCALES.tub);
+  ctx.fillStyle = 'rgba(176,166,146,0.16)'; ctx.fill(SCALES.tubHi);
+  // ash settled on the back (and more after death)
+  ctx.fillStyle = ASH_TOP; ctx.fillRect(-120, -70, 360, 70);
+  ctx.fillStyle = `rgba(196,188,170,${0.22 + D.ash * 0.35})`; ctx.fill(SCALES.speck);
+  if (D.ash > 0) { ctx.fillStyle = `rgba(160,153,138,${D.ash * 0.2})`; ctx.fill(bp); }
+  ctx.restore();
+  // spine bumps along the emaciated back
+  ctx.fillStyle = '#6a6457';
+  ctx.beginPath();
+  for (let x = -88; x <= 196; x += 12.5) {
+    const y = topY(x) + 2.5, r = 2.8 + (x > -40 && x < 20 ? 1.6 : 0.6) + Math.sin(x * 0.7) * 0.6;
+    ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, TAU);
+  }
+  ctx.fill();
+  // rim light from the sky
+  ctx.save(); ctx.clip(bp);
+  ctx.strokeStyle = 'rgba(206,196,168,0.22)'; ctx.lineWidth = 3;
+  ctx.translate(0, 2.2); ctx.stroke(bp);
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawNeck(D) {
+  const hw = (lx, ly) => {
+    const x = lx * HS, y = ly * HS, ca = Math.cos(D.ha), sa = Math.sin(D.ha);
+    return [D.N[0] + x * ca - y * sa, D.N[1] + x * sa + y * ca];
+  };
+  const a = D.toW(186, -16), b = hw(-6, -16), c = hw(10, 30), d = D.toW(214, 44), m = D.toW(214, 6);
+  ctx.fillStyle = '#4f4a3e';
+  ctx.beginPath();
+  ctx.moveTo(a[0], a[1]);
+  ctx.quadraticCurveTo((a[0] + b[0]) / 2, Math.min(a[1], b[1]) - 4, b[0], b[1]);
+  ctx.lineTo(c[0], c[1]);
+  ctx.quadraticCurveTo((c[0] + d[0]) / 2 + 4, Math.max(c[1], d[1]) + 2, d[0], d[1]);
+  ctx.lineTo(m[0], m[1]);
+  ctx.closePath(); ctx.fill();
+  // throat folds
+  ctx.strokeStyle = 'rgba(28,25,21,0.3)'; ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const u = 0.3 + i * 0.2;
+    const p = [lerp(d[0], c[0], u), lerp(d[1], c[1], u)], q = [lerp(m[0], b[0], u), lerp(m[1], b[1], u)];
+    ctx.moveTo(p[0], p[1]); ctx.quadraticCurveTo(lerp(p[0], q[0], 0.5) + 5, lerp(p[1], q[1], 0.5), lerp(p[0], q[0], 0.7), lerp(p[1], q[1], 0.7));
+  }
+  ctx.stroke();
+}
+
+function drawHead(D) {
+  ctx.save();
+  ctx.translate(D.N[0], D.N[1]); ctx.rotate(D.ha); ctx.scale(HS, HS);
+  // frill
+  ctx.fillStyle = FRILL_GRAD; ctx.fill(FRILL);
+  ctx.save(); ctx.clip(FRILL);
+  ctx.strokeStyle = 'rgba(30,25,20,0.32)'; ctx.lineWidth = 16; ctx.stroke(FRILL);
+  ctx.strokeStyle = 'rgba(160,140,108,0.16)'; ctx.lineWidth = 5; ctx.stroke(FRILL);
+  ctx.strokeStyle = 'rgba(32,27,22,0.13)'; ctx.lineWidth = 1.4; ctx.stroke(FRILL_VEINS);
+  ctx.fillStyle = 'rgba(30,26,22,0.18)'; ctx.fill(HEAD_TEX.d);
+  const sg = ctx.createLinearGradient(0, -120, 0, 30);
+  sg.addColorStop(0, `rgba(190,180,160,${0.18 + D.ash * 0.22})`); sg.addColorStop(0.4, 'rgba(190,180,160,0)'); sg.addColorStop(1, 'rgba(20,18,15,0.3)');
+  ctx.fillStyle = sg; ctx.fillRect(-120, -130, 170, 170);
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(40,34,28,0.55)'; ctx.lineWidth = 1.3; ctx.stroke(FRILL);
+  // far brow horn
+  ctx.save(); ctx.translate(10, -6); ctx.fillStyle = '#4d473c'; ctx.fill(HORN); ctx.restore();
+  // skull
+  ctx.fillStyle = SKULL_GRAD; ctx.fill(SKULL);
+  ctx.save(); ctx.clip(SKULL);
+  ctx.fillStyle = 'rgba(28,25,21,0.24)'; ctx.fill(HEAD_TEX.d);
+  ctx.fillStyle = 'rgba(180,170,150,0.12)'; ctx.fill(HEAD_TEX.l);
+  // cheek hollow (gaunt)
+  let g = ctx.createRadialGradient(40, 18, 2, 40, 18, 28);
+  g.addColorStop(0, 'rgba(22,19,16,0.32)'); g.addColorStop(1, 'rgba(22,19,16,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, -10, 80, 60);
+  ctx.strokeStyle = 'rgba(26,22,18,0.35)'; ctx.lineWidth = 1.6; ctx.stroke(WRINKLES);
+  ctx.fillStyle = `rgba(170,162,146,${D.ash * 0.25})`; ctx.fill(SKULL);
+  ctx.restore();
+  // mouth line
+  ctx.strokeStyle = 'rgba(24,20,16,0.7)'; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.moveTo(141, 31); ctx.quadraticCurveTo(118, 31, 92, 28); ctx.quadraticCurveTo(70, 26, 54, 21); ctx.stroke();
+  // beak
+  ctx.fillStyle = '#3e382f'; ctx.fill(BEAK); ctx.fill(PREDENT);
+  ctx.strokeStyle = 'rgba(150,140,118,0.3)'; ctx.lineWidth = 1.2; ctx.stroke(BEAK);
+  // jugal (cheek) horn
+  ctx.fillStyle = '#857b66'; ctx.fill(JUGAL);
+  // nasal horn
+  g = ctx.createLinearGradient(110, -10, 117, -43); g.addColorStop(0, '#6a6252'); g.addColorStop(1, '#a89c80');
+  ctx.fillStyle = g; ctx.fill(NASAL);
+  // near brow horn
+  ctx.fillStyle = HORN_GRAD; ctx.fill(HORN);
+  ctx.strokeStyle = 'rgba(40,34,27,0.35)'; ctx.lineWidth = 1; ctx.stroke(HORN);
+  ctx.strokeStyle = 'rgba(60,52,42,0.35)'; ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) { const u = 0.15 + i * 0.13; ctx.moveTo(lerp(52, 128, u) - 6, lerp(-26, -92, u) + 1); ctx.lineTo(lerp(66, 132, u) + 2, lerp(-24, -95, u) + 3); }
+  ctx.stroke();
+  // brow ridge
+  g = ctx.createRadialGradient(62, -20, 1, 62, -18, 16);
+  g.addColorStop(0, 'rgba(176,166,144,0.25)'); g.addColorStop(1, 'rgba(176,166,144,0)');
+  ctx.fillStyle = g; ctx.fillRect(44, -36, 36, 24);
+  // eye
+  const [ex, ey] = EYE;
+  ctx.fillStyle = 'rgba(20,17,13,0.55)';
+  ctx.beginPath(); ctx.ellipse(ex, ey, 10, 7.5, -0.1, 0, TAU); ctx.fill();
+  ctx.save();
+  ctx.beginPath(); ctx.ellipse(ex, ey, 6.2, 5, -0.1, 0, TAU); ctx.clip();
+  ctx.fillStyle = '#17130e'; ctx.fillRect(ex - 8, ey - 7, 16, 14);
+  ctx.fillStyle = '#4f3c1f'; ctx.beginPath(); ctx.arc(ex + 1.2, ey + 0.3, 4.1, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#050403'; ctx.beginPath(); ctx.arc(ex + 1.4, ey + 0.4, 2.1, 0, TAU); ctx.fill();
+  ctx.fillStyle = `rgba(232,222,196,${0.55 * D.eye})`; ctx.beginPath(); ctx.arc(ex - 0.6, ey - 1.8, 1.1, 0, TAU); ctx.fill();
+  // eyelids
+  const open = clamp(D.eye, 0, 1);
+  const lidY = ey - 5.6 + (1 - open) * 10.4;
+  ctx.fillStyle = '#555044';
+  ctx.beginPath(); ctx.moveTo(ex - 9, ey - 9); ctx.lineTo(ex + 9, ey - 9); ctx.lineTo(ex + 9, lidY - 0.6); ctx.quadraticCurveTo(ex, lidY + 1.6, ex - 9, lidY - 0.6); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#4b463c';
+  ctx.beginPath(); ctx.moveTo(ex - 9, ey + 9); ctx.lineTo(ex + 9, ey + 9); ctx.lineTo(ex + 9, ey + 3.6); ctx.quadraticCurveTo(ex, ey + 2.6, ex - 9, ey + 3.6); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(18,15,12,0.8)'; ctx.lineWidth = 1.1;
+  ctx.beginPath(); ctx.moveTo(ex - 7, lidY - 0.3); ctx.quadraticCurveTo(ex, lidY + 1.4, ex + 7, lidY - 0.3); ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(26,22,18,0.4)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.ellipse(ex, ey, 12, 9, -0.1, PI * 1.05, PI * 1.95); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(ex, ey + 1, 13, 10, -0.1, PI * 0.1, PI * 0.8); ctx.stroke();
+  // nostril — flares with breath
+  ctx.fillStyle = 'rgba(16,13,10,0.85)';
+  ctx.beginPath(); ctx.ellipse(124, 3, 5 + D.breath * 1.3, 3.2 + D.breath * 0.9, 0.5, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawDino(D) {
+  drawShadow(D);
+  drawLeg(D.legs[0], COL_FAR);
+  drawLeg(D.legs[1], COL_FAR);
+  drawTail(D);
+  drawBody(D);
+  drawNeck(D);
+  drawLeg(D.legs[2], COL_NEAR);
+  drawLeg(D.legs[3], COL_NEAR);
+  drawHead(D);
+}
+
+/* ==========================================================================
+   Scene drawing
+   ========================================================================== */
+function drawSky(t) {
+  const L0 = LAYERS[0];
+  const z = layerZ(L0.p), hY = (L0.base - layerCY(L0.pv)) * S * z + H / 2;
+  const top = hY - 1150 * S * z;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const g = ctx.createLinearGradient(0, top, 0, hY);
+  g.addColorStop(0, '#24221e'); g.addColorStop(0.35, '#423e34'); g.addColorStop(0.62, '#6c6550');
+  g.addColorStop(0.84, '#958866'); g.addColorStop(1, '#b0a07a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // dim sun behind the dust
+  setLayer(0.02, 0.14);
+  const sx = 420, sy = -600;
+  let rg = ctx.createRadialGradient(sx, sy, 10, sx, sy, 640);
+  rg.addColorStop(0, 'rgba(220,196,136,0.42)'); rg.addColorStop(0.3, 'rgba(190,168,116,0.16)'); rg.addColorStop(1, 'rgba(190,168,116,0)');
+  ctx.fillStyle = rg; ctx.fillRect(sx - 700, sy - 700, 1400, 1400);
+  rg = ctx.createRadialGradient(sx, sy, 0, sx, sy, 48);
+  rg.addColorStop(0, 'rgba(236,222,180,0.55)'); rg.addColorStop(0.75, 'rgba(230,212,164,0.4)'); rg.addColorStop(1, 'rgba(230,212,164,0)');
+  ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(sx, sy, 48, 0, TAU); ctx.fill();
+
+  // high dust strata drifting across the sun
+  setLayer(0.035, 0.18);
+  const wd = windDrift(t);
+  for (const c of SKYCLOUDS) {
+    const x = -1400 + mod(c.x + t * c.sp + wd * 0.2, 3600);
+    blob(c.dark ? SMK_D[c.k] : SMK_M[c.k], x, c.y, c.w, c.w * c.h, c.a * (c.dark ? 1.15 : 0.9));
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawColumns(t) {
+  setLayer(0.1, 0.36);
+  const wind = windAt(t);
+  for (const C of COLUMNS) {
+    // ember glow at the base
+    const fl = 0.5 + 0.25 * N2(t * 1.7 + C.x) + 0.15 * Math.sin(t * 3.1 + C.x);
+    blob(GLOW_FIRE, C.x, C.y + 8, 260 * C.s, 90 * C.s, 0.16 * fl);
+    const n = 38;
+    for (let i = 0; i < n; i++) {
+      const u = frac(i / n + t * 0.011 + C.ph);
+      const x = C.x + u * u * 560 * C.s * (0.7 + wind * 0.4) + Math.sin(u * 7 + i) * 12 * u;
+      const y = C.y - 10 - u * 680 * C.s;
+      const sz = (34 + u * 230) * C.s;
+      const a = Math.pow(Math.sin(PI * Math.min(1, u * 1.12)), 0.6) * 0.34 * (1 - u * 0.45);
+      blob(i % 3 ? SMK_D[i & 1] : SMK_M[i & 1], x, y, sz * 1.3, sz, a);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHill(L, t, wind) {
+  setLayer(L.p, L.pv);
+  ctx.fillStyle = L.grad; ctx.fill(L.path);
+  if (L.buckets) {
+    ctx.strokeStyle = L.top; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const [w, p] of L.buckets) { ctx.lineWidth = w; ctx.stroke(p); }
+  }
+  if (L.swayTrees) {
+    const [x0, x1] = visRange(L.p);
+    for (const T of L.swayTrees) {
+      if (T.x < x0 - 200 || T.x > x1 + 200) continue;
+      drawTree(T.tree, T.x, T.y, t + T.ph, wind, L.top, null, 0.7);
+    }
+  }
+  const [fx0, fx1] = visRange(L.p), z = layerZ(L.p);
+  const yBot = layerCY(L.pv) + H / 2 / (S * z) + 4;     // bottom edge of the screen in layer space
+  const yTop = L.base - L.amp;
+  if (yBot > yTop) { ctx.fillStyle = L.fogGrad; ctx.fillRect(fx0 - 10, yTop, fx1 - fx0 + 20, yBot - yTop); }
+}
+
+function drawBanks(li, t) {
+  const L = LAYERS[li];
+  setLayer(L.p, L.pv);
+  const wd = windDrift(t);
+  for (const b of BANKS) {
+    if (b.li !== li) continue;
+    const x = -2000 + mod(b.x + t * b.sp + wd * 0.5, 5200);
+    blob(b.dark ? SMK_D[b.k] : SMK_L[b.k], x, b.y, b.w, b.w * b.h, b.a);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawGround(t, wind) {
+  setLayer(1, 1);
+  ctx.fillStyle = GROUND_GRAD; ctx.fill(GROUND_PATH);
+  const [x0, x1] = visRange(1);
+  for (const c of CHUNKS) {
+    if (c.x + 400 < x0 - 40 || c.x > x1 + 40) continue;
+    ctx.fillStyle = 'rgba(36,33,29,0.34)'; ctx.fill(c.dark);
+    ctx.fillStyle = 'rgba(198,190,172,0.16)'; ctx.fill(c.light);
+    ctx.strokeStyle = 'rgba(32,29,25,0.4)'; ctx.lineWidth = 1.1; ctx.stroke(c.crack);
+  }
+  ctx.fillStyle = GROUND_HAZE; ctx.fillRect(x0 - 50, -110, x1 - x0 + 100, 130);
+  // distant stumps
+  ctx.fillStyle = '#3a3631';
+  ctx.beginPath();
+  for (const s of STUMPS) {
+    if (s.x < x0 - 60 || s.x > x1 + 60) continue;
+    ctx.moveTo(s.x - s.w / 2 - 3, s.y + 2);
+    ctx.lineTo(s.x - s.w / 2, s.y - s.h * 0.9);
+    ctx.lineTo(s.x - s.w * 0.1, s.y - s.h * (0.7 + s.j * 0.3));
+    ctx.lineTo(s.x + s.w * 0.15, s.y - s.h);
+    ctx.lineTo(s.x + s.w / 2, s.y - s.h * 0.75);
+    ctx.lineTo(s.x + s.w / 2 + 3, s.y + 2);
+    ctx.closePath();
+  }
+  ctx.fill();
+  // background trees on the plain
+  for (const T of GROUND_TREES) {
+    if (T.x < x0 - 400 || T.x > x1 + 400) continue;
+    drawTree(T.tree, T.x, T.y, t, wind, '#34302b', 'rgba(150,142,126,0.22)', 0.8);
+  }
+  // rocks behind the walking line
+  for (const r of ROCKS_BACK) {
+    if (r.x < x0 - 40 || r.x > x1 + 40) continue;
+    ctx.fillStyle = r.g; ctx.fill(r.p);
+  }
+  // remains of an earlier victim
+  if (SKEL_X > x0 - 200 && SKEL_X < x1 + 200) {
+    ctx.strokeStyle = 'rgba(176,166,146,0.75)'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke(SKELETON);
+    ctx.fillStyle = 'rgba(176,166,146,0.8)'; ctx.fill(SKULL_REM);
+    ctx.fillStyle = 'rgba(120,114,102,0.6)';
+    ctx.beginPath(); ctx.ellipse(SKEL_X - 10, SKEL_Y + 3, 150, 6, 0, 0, TAU); ctx.fill();
+  }
+}
+
+function drawHeroTree(t, wind) {
+  setLayer(1, 1);
+  ctx.fillStyle = '#2c2925'; ctx.fill(HERO_ROOTS);
+  drawTree(HERO, TREE_X, TREE_BASE_Y, t, wind, '#2c2925', 'rgba(158,150,132,0.32)', 1);
+  // bark fissures on the trunk
+  ctx.strokeStyle = 'rgba(14,12,10,0.5)'; ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const x = TREE_X - 14 + i * 5.5;
+    ctx.moveTo(x, TREE_BASE_Y - 4);
+    ctx.bezierCurveTo(x + 4, TREE_BASE_Y - 70, x - 3, TREE_BASE_Y - 120, x + 1 + (i - 3) * 1.5, TREE_BASE_Y - 170 - i * 9);
+  }
+  ctx.stroke();
+}
+
+function drawPrints(t) {
+  ctx.fillStyle = 'rgba(38,35,31,0.5)';
+  for (const p of PRINTS) {
+    if (p.t > t) continue;
+    const a = clamp((t - p.t) / 0.3, 0, 1) * (1 - 0.5 * clamp((t - p.t) / 70, 0, 1));
+    ctx.globalAlpha = a * (p.far ? 0.6 : 1);
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, p.hind ? 17 : 12, p.hind ? 3.6 : 3, 0, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawPuffs(t) {
+  for (const p of PUFFS) {
+    const u = (t - p.t) / (1.6 + p.s * 0.35);
+    if (u <= 0 || u >= 1) continue;
+    const a = (1 - u) * (1 - u) * 0.28 * Math.min(1, p.s);
+    for (let k = 0; k < 3; k++) {
+      const dx = (k - 1) * 18 * p.s * eout(u) + windAt(t) * 30 * u;
+      const r = (14 + 40 * eout(u)) * p.s * (0.8 + k * 0.15);
+      blob(SMK_L[k & 1], p.x + dx, p.y - 6 - u * 18 * p.s - k * 3, r * 1.8, r, a);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+const LEAF_T0 = 60.4, LEAF_T1 = 68.0;
+function drawLeaf(t, wind) {
+  if (!LEAF_NODE) return;
+  let x, y, rot;
+  const n = LEAF_NODE;
+  if (t < LEAF_T0) {
+    x = n.tx; y = n.ty + 6;
+    rot = 1.2 + Math.sin(t * 5.3) * 0.35 * wind + Math.sin(t * 2.1) * 0.2;
+  } else {
+    const u = clamp((t - LEAF_T0) / (LEAF_T1 - LEAF_T0), 0, 1);
+    const x1 = ROOT_END + 336, y1 = -1.5;
+    x = lerp(n.tx, x1, sm(u)) + Math.sin(u * PI * 5) * 34 * (1 - u);
+    y = lerp(n.ty + 6, y1, Math.pow(u, 1.1)) - Math.abs(Math.sin(u * PI * 5)) * 10 * (1 - u);
+    rot = u < 1 ? Math.sin(u * PI * 5 + 1) * 1.2 + 0.4 : 0.15;
+  }
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(1.5, 1.5);
+  ctx.fillStyle = '#6a5233';
+  ctx.beginPath(); ctx.moveTo(-9, 0); ctx.quadraticCurveTo(-2, -5.5, 9, 0); ctx.quadraticCurveTo(-2, 5, -9, 0); ctx.fill();
+  ctx.strokeStyle = 'rgba(40,28,15,0.8)'; ctx.lineWidth = 0.7;
+  ctx.beginPath(); ctx.moveTo(-11, 0); ctx.lineTo(8, 0); ctx.stroke();
+  ctx.restore();
+}
+
+function drawFront(t, wind) {
+  setLayer(1, 1);
+  const [x0, x1] = visRange(1);
+  for (const r of ROCKS_FRONT) {
+    if (r.x < x0 - 80 || r.x > x1 + 80) continue;
+    ctx.fillStyle = r.g; ctx.fill(r.p);
+  }
+  const wd = windDrift(t);
+  for (const w of WISPS) {
+    const x = -1900 + mod(w.x + t * w.sp + wd * 0.8, 4600);
+    blob(SMK_L[w.k], x, w.y, w.w, w.w * 0.22, w.a);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawForeground(t, wind) {
+  setLayer(1.32, 1.18);
+  const [x0, x1] = visRange(1.32);
+  ctx.fillStyle = '#1d1a17'; ctx.fill(FG.ground);
+  ctx.fillStyle = '#211e1a';
+  for (const r of FG.rocks) ctx.fill(r);
+  ctx.strokeStyle = '#1b1815'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const f of FG.ferns) {
+    if (f.x < x0 - 200 || f.x > x1 + 200) continue;
+    const k = (Math.sin(t * 1.4 + f.ph) * 0.06 + 0.05) * wind;
+    ctx.save(); ctx.translate(f.x, f.y); ctx.transform(1, 0, -k, 1, 0, 0); ctx.scale(f.s, f.s);
+    ctx.lineWidth = 2.6; ctx.stroke(f.p);
+    ctx.restore();
+  }
+  // faint top edge catching the light
+  ctx.strokeStyle = 'rgba(120,112,98,0.18)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = x0 - 20; x <= x1 + 20; x += 12) { const y = FG.top(x) + 1; x === x0 - 20 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+  ctx.stroke();
+}
+
+/* Falling ash */
+let ASH = null;
+function initAsh() {
+  const n = Math.round(clamp(W * H / 3600, 140, 460));
+  const r = mulberry32(2024);
+  ASH = [];
+  for (let i = 0; i < n; i++) ASH.push({ x: r(), y: r(), d: 0.25 + Math.pow(r(), 1.6) * 1.55, ph: r() * TAU, f: 0.5 + r() });
+  ASH.sort((a, b) => a.d - b.d);
+}
+function drawAsh(t, wind) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const k = S / 1.2, FW = W + 120, FH = H + 60;
+  const wd = windDrift(t) * k;
+  const cam = CAM.x * S * CAM.z;
+  const buckets = [[], [], []];
+  for (const p of ASH) {
+    const d = p.d;
+    const x = mod(p.x * FW + wd * d * 2.2 - cam * d * 0.35 + Math.sin(t * p.f + p.ph) * 14 * d * k, FW) - 60;
+    const y = mod(p.y * FH + t * (14 + 26 * d) * k + Math.sin(t * p.f * 0.7 + p.ph) * 6 * k, FH) - 30;
+    buckets[d < 0.7 ? 0 : d < 1.3 ? 1 : 2].push(x, y, d);
+  }
+  const styles = ['rgba(214,206,188,0.38)', 'rgba(220,212,194,0.55)', null];
+  for (let b = 0; b < 2; b++) {
+    ctx.fillStyle = styles[b];
+    ctx.beginPath();
+    const a = buckets[b];
+    for (let i = 0; i < a.length; i += 3) {
+      const r = (0.5 + a[i + 2] * 1.1) * Math.max(0.8, k);
+      ctx.moveTo(a[i] + r, a[i + 1]); ctx.arc(a[i], a[i + 1], r, 0, TAU);
+    }
+    ctx.fill();
+  }
+  const a = buckets[2];
+  for (let i = 0; i < a.length; i += 3) {
+    const r = (2.5 + (a[i + 2] - 1.3) * 9) * Math.max(0.8, k);
+    blob(GLOW_ASH, a[i], a[i + 1], r * 2.4, r * 2.4, 0.4);
+  }
+  // rare dying embers
+  for (let i = 0; i < 7; i++) {
+    const u = frac(t * 0.045 + i * 0.137);
+    const x = mod(i * 0.29 * FW + wd * 0.6 + Math.sin(t * 0.9 + i) * 30, FW) - 60;
+    const y = H * (1.02 - u * 0.75);
+    const fl = 0.5 + 0.5 * Math.sin(t * 9 + i * 3);
+    blob(GLOW_FIRE, x, y, 7 * k + 4, 7 * k + 4, (1 - u) * 0.45 * fl * sstep(0, 0.1, u));
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawGrade(t) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.drawImage(vignette, 0, 0, W, H);
+  // film grain
+  ctx.globalAlpha = 0.05;
+  const ox = (Math.random() * 180) | 0, oy = (Math.random() * 180) | 0;
+  ctx.translate(-ox, -oy);
+  ctx.fillStyle = grainPat; ctx.fillRect(0, 0, W + ox, H + oy);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalAlpha = 1;
+}
+
+/* ==========================================================================
+   Main loop
+   ========================================================================== */
+const capA = document.getElementById('capA'), capB = document.getElementById('capB');
+const pauseEl = document.getElementById('pause');
+const qs = new URLSearchParams(location.search);
+let T = qs.has('t') ? parseFloat(qs.get('t')) || 0 : 0;
+let paused = qs.has('pause');
+let last = performance.now();
+let barPx = -1;
+
+function updateCamera(t) {
+  const lead = portrait ? 20 : 125, endOff = portrait ? -15 : 115;
+  const k = sstep(27, 36, t);
+  let x = samp(tabCX, t) + lerp(lead, endOff, k) + sstep(72, 87, t) * (portrait ? 40 : 70);
+  let y = camYTrack(t);
+  if (portrait) y -= (H / S - 900) * 0.24;
+  x += 3 * N3(t * 0.3); y += 2 * N4(t * 0.37 + 5);
+  let sk = 0; for (const s of STUM) sk = Math.max(sk, stumbleK(t, s));
+  x += sk * 3 * Math.sin(t * 38); y += sk * 3 * Math.sin(t * 43);
+  const imp = Math.max(Math.exp(-Math.max(0, t - 43.75) * 6) * (t > 43.75 ? 1 : 0), Math.exp(-Math.max(0, t - 46.5) * 5) * (t > 46.5 ? 1 : 0));
+  y += imp * 3 * Math.sin(t * 50);
+  CAM.x = x; CAM.y = y; CAM.z = portrait ? 1 + (zoomTrack(t) - 1) * 0.35 : zoomTrack(t);
+}
+
+function render(t) {
+  updateCamera(t);
+  const wind = windAt(t);
+  drawSky(t);
+  drawColumns(t);
+  drawHill(LAYERS[0], t, wind);
+  drawHill(LAYERS[1], t, wind);
+  drawBanks(1, t);
+  drawHill(LAYERS[2], t, wind);
+  drawBanks(2, t);
+  drawHill(LAYERS[3], t, wind);
+  drawBanks(3, t);
+  drawGround(t, wind);
+  drawHeroTree(t, wind);
+  setLayer(1, 1);
+  drawPrints(t);
+  const D = computeDino(t);
+  drawDino(D);
+  drawPuffs(t);
+  drawLeaf(t, wind);
+  drawFront(t, wind);
+  drawForeground(t, wind);
+  drawAsh(t, wind);
+  drawGrade(t);
+
+  // letterbox + fades
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const bar = Math.round((portrait ? H * 0.035 : H * 0.075) * sstep(0, 3.5, t));
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, bar); ctx.fillRect(0, H - bar, W, bar);
+  if (bar !== barPx) { barPx = bar; document.documentElement.style.setProperty('--bar', bar + 'px'); }
+  const fade = Math.max(1 - sstep(0.3, 4.2, t), sstep(85, 89, t));
+  if (fade > 0.001) { ctx.globalAlpha = fade; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+
+  capA.classList.toggle('on', t > 3 && t < 10);
+  capB.classList.toggle('on', t > 76.5 && t < 84.5);
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (!paused) { T += dt; if (T >= T_END) T = 0; }
+  render(T);
+  requestAnimationFrame(frame);
+}
+
+function onResize() { resize(); initAsh(); }
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', () => setTimeout(onResize, 120));
+cvs.addEventListener('click', () => { paused = !paused; pauseEl.classList.toggle('on', paused); });
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { paused = !paused; pauseEl.classList.toggle('on', paused); e.preventDefault(); }
+});
+document.addEventListener('visibilitychange', () => { last = performance.now(); });
+
+onResize();
+pauseEl.classList.toggle('on', paused && !qs.has('t'));
+window.__scene = { seek: t => { T = t; render(T); }, get t() { return T; }, T_DEATH, STUM };
+requestAnimationFrame(t => { last = t; frame(t); });
+})();
+</script>
+</body>
+</html>
