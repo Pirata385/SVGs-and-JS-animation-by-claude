@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>The Last Walk</title>
+<meta name="description" content="A lonely Triceratops walks through an ash-covered world and lies down beside a dead tree for the last time.">
+<style>
+  :root { --caption: #e4d9b8; }
+  html, body { margin: 0; height: 100%; background: #15130f; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  .veil { position: fixed; inset: 0; pointer-events: none; }
+  .vignette { background: radial-gradient(ellipse 75% 70% at 50% 45%, rgba(0,0,0,0) 55%, rgba(8,6,3,.72) 100%); }
+  .grain { background: rgba(70,56,30,.08); mix-blend-mode: multiply; animation: flicker 4.1s steps(6) infinite; }
+  @keyframes flicker { 0%,100% { opacity: 1 } 30% { opacity: .55 } 60% { opacity: .9 } 80% { opacity: .4 } }
+  #fade { background: #000; opacity: 1; }
+  #caption {
+    position: fixed; left: 0; right: 0; bottom: 11vh; padding: 0 20px; text-align: center;
+    font: 400 clamp(13px, 2.2vw, 22px)/1.4 Georgia, "Times New Roman", serif;
+    letter-spacing: .22em; text-transform: uppercase; color: var(--caption);
+    text-shadow: 0 1px 10px rgba(0,0,0,.85); opacity: 0; transition: opacity 1.4s ease; pointer-events: none;
+  }
+  #caption.show { opacity: .9; }
+  #replay {
+    position: fixed; left: 50%; bottom: 4vh; transform: translateX(-50%); opacity: 0; pointer-events: none;
+    background: none; border: 1px solid rgba(228,217,184,.35); color: var(--caption);
+    font: 12px Georgia, serif; letter-spacing: .25em; text-transform: uppercase; padding: 9px 18px; cursor: pointer;
+    transition: opacity 1.5s ease;
+  }
+  #replay.show { opacity: .7; pointer-events: auto; }
+  #replay:hover, #replay:focus-visible { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="stage" role="img" aria-label="A lonely Triceratops walks through an ash-covered world, stops beside a dead tree, and lies down to rest."></canvas>
+<div class="veil vignette"></div>
+<div class="veil grain"></div>
+<div id="fade" class="veil"></div>
+<div id="caption" aria-live="polite"></div>
+<button id="replay" type="button">Watch again</button>
+<script>
+(() => {
+'use strict';
+
+/* ------------------------------------------------------------------
+   Timeline and scene constants. All drawing happens in "scene units",
+   where the full viewport height is 900 units, so the layout holds at
+   any size. Phones get the same framing, with a smaller animal.
+------------------------------------------------------------------- */
+const TAU = Math.PI * 2;
+const END = 72;                    // film length in seconds; the last frame holds
+const SCENE_H = 900;
+const G = 720;                     // ground line the animal's feet rest on
+const HORIZON = 560;
+const SPEED = 40;                  // walking speed, scene units per second
+const WALK_END = 25.6;             // the animal comes to a stop here
+const LIE_A = 25.6, LIE_B = 34.5;  // the lowering onto the ground
+const KEY_GAP = 480;               // dead tree beside the resting animal (creature units)
+const L1 = 132, L2 = 122;          // leg segment lengths (creature units)
+const FAR_PLUMES = [250, 1050, 1850, 2650];
+const MID_PLUMES = [620, 1420, 2250];
+const DUST = [{ t: 8.5, n: 6, r: 48 }, { t: 15.5, n: 6, r: 48 }, { t: 34.2, n: 9, r: 120 }];
+const CAPTIONS = [
+  { t: 1.8,  end: 5.8,      text: 'Day nine after the impact' },
+  { t: 11.0, end: 15.2,     text: 'The herds are gone' },
+  { t: 39.5, end: 45.5,     text: 'Nothing grows here anymore' },
+  { t: 55.0, end: Infinity, text: 'The last breath' },
+];
+
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+const capEl = document.getElementById('caption');
+const fadeEl = document.getElementById('fade');
+const replayBtn = document.getElementById('replay');
+
+/* ------------------------------ helpers ------------------------------ */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const u = clamp((x - a) / (b - a)); return u * u * (3 - 2 * u); };
+const bump = (t, t0, w) => { const u = (t - t0) / w; return u < 0 || u > 1 ? 0 : Math.sin(Math.PI * u); };
+const gauss = (t, c, w) => Math.exp(-(((t - c) / w) ** 2));
+
+function rngFrom(seed) {                       // small seeded PRNG so the scenery is the same every time
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* --------------------- timeline functions (pure) --------------------- */
+function speedAt(t) {
+  if (t >= WALK_END) return 0;
+  let v = SPEED * sstep(0, 3, t) * (1 - sstep(20, WALK_END, t));   // heavy start, slow down near the tree
+  v *= 1 - 0.7 * bump(t, 8.5, 1) - 0.7 * bump(t, 15.5, 1);          // two stumbles drag the walk
+  return v;
+}
+
+function windAt(t) {
+  return 0.5 + 0.28 * Math.sin(t * 0.37) + 0.12 * Math.sin(t * 1.13 + 1.2)
+       + 0.9 * gauss(t, 19, 1.4) + 0.5 * gauss(t, 53, 2.2);
+}
+
+// Distance covered by the walk. The dead tree is placed relative to this.
+const STOP_X = (() => {
+  let x = 0;
+  const dt = 1 / 240;
+  for (let t = 0; t < WALK_END; t += dt) x += speedAt(t) * dt;
+  return x;
+})();
+
+/* ------------------------------ sprites ------------------------------ */
+function radialSprite(size, stops) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  stops.forEach(([o, col]) => gr.addColorStop(o, col));
+  g.fillStyle = gr;
+  g.fillRect(0, 0, size, size);
+  return c;
+}
+const puffImg = radialSprite(128, [[0, 'rgba(78,72,60,.95)'], [0.4, 'rgba(78,72,60,.5)'], [1, 'rgba(78,72,60,0)']]);
+
+const cloudImg = (() => {
+  const r = rngFrom(555);
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 160;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 14; i++) {
+    const x = 80 + r() * 350, y = 70 + (r() - 0.5) * 40, rx = 40 + r() * 90, ry = 10 + r() * 18;
+    g.save();
+    g.translate(x, y);
+    g.scale(1, ry / rx);
+    const gr = g.createRadialGradient(0, 0, 0, 0, 0, rx);
+    gr.addColorStop(0, 'rgba(226,212,160,.55)');
+    gr.addColorStop(1, 'rgba(226,212,160,0)');
+    g.fillStyle = gr;
+    g.beginPath(); g.arc(0, 0, rx, 0, TAU); g.fill();
+    g.restore();
+  }
+  return c;
+})();
+
+// Dead trees: branches drawn once into an offscreen canvas, then swayed as a whole.
+function makeTree(seed, h, color, res) {
+  const r = rngFrom(seed);
+  const w = h * 0.9;
+  const c = document.createElement('canvas');
+  c.width = Math.max(2, Math.ceil(w * res));
+  c.height = Math.max(2, Math.ceil(h * res));
+  const g = c.getContext('2d');
+  g.setTransform(res, 0, 0, res, 0, 0);
+  g.strokeStyle = color;
+  g.lineCap = 'round';
+  const limb = (x, y, a, len, wd, d) => {
+    const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len;
+    g.lineWidth = Math.max(wd, 1.2 / res);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x2, y2); g.stroke();
+    if (d <= 0 || len < 4) return;
+    const n = d > 3 ? 2 + (r() < 0.5 ? 1 : 0) : 2;
+    for (let i = 0; i < n; i++) {
+      limb(x2, y2, a + (r() - 0.5) * (d > 3 ? 0.9 : 1.4), len * (0.64 + r() * 0.16), wd * 0.68, d - 1);
+    }
+  };
+  limb(w / 2, h, -Math.PI / 2 + (r() - 0.5) * 0.12, h * 0.2, h * 0.045, 6);
+  return { c, w, h };
+}
+
+/* ------------------------- skin marks (seeded) ------------------------- */
+const MARKS = (() => {
+  const r = rngFrom(77);
+  const spots = (x0, w, y0, h, n) => Array.from({ length: n }, () => ({
+    x: x0 + r() * w, y: y0 + r() * h, r: 1.2 + r() * 3.6, a: 0.08 + r() * 0.2,
+  }));
+  const wrinkles = Array.from({ length: 22 }, () => {
+    const x = -170 + r() * 320, y = -280 + r() * 150;
+    return [x, y, x + 20 + r() * 30, y + (r() - 0.5) * 24, x + 50 + r() * 50, y + (r() - 0.5) * 30];
+  });
+  return {
+    body: spots(-190, 380, -300, 200, 110),
+    wrinkles,
+    head: spots(-70, 190, -50, 90, 40),
+    frill: spots(-160, 220, -125, 110, 60),
+  };
+})();
+
+/* ------------------------------ scene state ------------------------------ */
+let S = 1, dpr = 1, VW = 1600, cK = 1, SX0 = 576;      // scale, device ratio, view width, creature scale, creature screen x
+let scene = { far: [], mid: [], near: [], fore: [], clouds: [], streaks: [], bones: [] };
+let ash = [];
+const puffs = [];
+const sim = {};
+
+function buildScenery() {
+  const R = rngFrom(1307);
+  const res = Math.max(0.6, S * dpr * 0.7);
+  scene = { far: [], mid: [], near: [], fore: [], clouds: [], streaks: [], bones: [] };
+  const add = (layer, wx, base, f, h, color, alpha) => {
+    const seed = (R() * 1e6) | 0;
+    scene[layer].push({ wx, base, f, seed, alpha, sprite: makeTree(seed, h, color, res) });
+  };
+  for (let i = 0; i < 26; i++) add('far', -300 + R() * 3500, HORIZON - 14 + R() * 26, 0.3, 110 + R() * 90, '#6f6a5a', 0.9);
+  for (let i = 0; i < 16; i++) add('mid', -200 + R() * 3300, 640 + R() * 40, 0.62, 190 + R() * 90, '#3c382d', 1);
+  for (const o of [-620, -240, 560, 1050]) add('near', STOP_X + o, G + 6, 1, 300 + R() * 60, '#2b271f', 1);
+  add('near', STOP_X + KEY_GAP * cK, G + 6, 1, 430, '#211d16', 1);     // the dead tree the animal rests beside
+  for (const x of [150, 1480, 2700]) add('fore', x, 990, 1.45, 640, '#120f0b', 0.92);
+  for (let i = 0; i < 9; i++) scene.clouds.push({ wx: -400 + R() * 3400, y: 80 + R() * 220, w: 520 + R() * 320, a: 0.25 + R() * 0.25 });
+  for (let i = 0; i < 150; i++) scene.streaks.push({ wx: -400 + R() * 3600, y: 600 + Math.pow(R(), 1.5) * 300, len: 30 + R() * 120 });
+  for (const wx of [-300, 160, 1130, 1750, 2350]) scene.bones.push({ wx, rot: (R() - 0.5) * 0.3 });
+}
+
+function initAsh() {
+  const n = Math.round(clamp((VW * SCENE_H) / 7000, 90, 260));
+  ash = Array.from({ length: n }, () => newAsh(true));
+}
+function newAsh(anywhere) {
+  const z = 0.4 + Math.random() * 1.2;               // depth: bigger and faster when nearer
+  return {
+    x: Math.random() * VW, y: anywhere ? Math.random() * SCENE_H : -10, z,
+    vy: 14 + 26 * z, ph: Math.random() * TAU, w: 0.6 + Math.random() * 1.4, a: 0.25 + Math.random() * 0.5,
+  };
+}
+
+function resize() {
+  const W = window.innerWidth, H = window.innerHeight;
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  S = H / SCENE_H;
+  VW = W / S;
+  cK = Math.min(1, (VW * 0.72) / 560);
+  SX0 = 0.36 * VW;
+  buildScenery();
+  initAsh();
+}
+
+/* ------------------------------ smoke and dust ------------------------------ */
+function spawnPuff(wx, y, f, r0, r1, life, alpha, vx, vy) {
+  if (puffs.length < 140) puffs.push({ wx, y, f, r0, r1, life, alpha, vx, vy, age: 0 });
+}
+
+function updatePuffs(dt) {
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i];
+    p.age += dt;
+    if (p.age >= p.life) { puffs.splice(i, 1); continue; }
+    p.wx += (p.vx + (sim.wind - 0.5) * 5) * dt;
+    p.y += p.vy * dt;
+  }
+}
+
+function drawPuffs(f0, f1) {
+  for (const p of puffs) {
+    if (p.f < f0 || p.f >= f1) continue;
+    const k = p.age / p.life;
+    const r = lerp(p.r0, p.r1, k);
+    const sx = p.wx - sim.cam * p.f;
+    if (sx < -r || sx > VW + r) continue;
+    ctx.globalAlpha = p.alpha * Math.sin(Math.PI * k);
+    ctx.drawImage(puffImg, sx - r, p.y - r, r * 2, r * 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function updateAsh(dt) {
+  const w = sim.wind;
+  for (const p of ash) {
+    p.y += p.vy * dt;
+    p.x += ((w * 16) + 6) * p.z * dt + Math.sin(sim.t * p.w + p.ph) * 5 * dt;
+    if (p.y > SCENE_H + 10) { p.y = -10; p.x = Math.random() * VW; }
+    if (p.x > VW + 10) p.x = -10;
+    if (p.x < -20) p.x = VW;
+  }
+}
+
+function drawAsh() {
+  for (const p of ash) {
+    ctx.globalAlpha = p.a;
+    ctx.fillStyle = p.z > 1.1 ? '#1f1b15' : '#d6ccae';
+    const r = 0.9 + 1.5 * p.z;
+    ctx.fillRect(p.x, p.y, r, r * 0.8);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ------------------------------ update ------------------------------ */
+function updateCaption() {
+  const t = sim.t;
+  let idx = -1;
+  CAPTIONS.forEach((c, i) => { if (t >= c.t && t < c.end) idx = i; });
+  if (idx !== sim.capIdx) {
+    sim.capIdx = idx;
+    if (idx >= 0) { capEl.textContent = CAPTIONS[idx].text; capEl.classList.add('show'); }
+    else capEl.classList.remove('show');
+  }
+}
+
+function update(dt) {
+  const s = sim;
+  const prev = s.t;
+  s.t = Math.min(END, s.t + dt);
+  const t = s.t;
+  s.wind = windAt(t);
+
+  // Locomotion: the world scrolls past while the animal holds its place on screen.
+  const v = speedAt(t);
+  s.cx += v * dt;
+  s.phase += ((v * dt) / (80 * cK)) * TAU;
+  s.gait = clamp(v / (SPEED * 0.55), 0, 1);
+  s.cam = s.cx - SX0;
+
+  const stumble = bump(t, 8.5, 1) + bump(t, 15.5, 1);
+  const lie = sstep(LIE_A, LIE_B, t);
+  const restK = sstep(29, 38, t);
+  const trem = sstep(24.2, 27.5, t) * (1 - sstep(40, 46, t)) * (0.75 + 0.25 * Math.sin(t * 5.3));
+
+  // Breathing: quick while walking, then slower and shallower until it nearly stops.
+  s.bp += (dt * TAU) / (lerp(2.2, 7.5, sstep(28, 62, t)) * (1 - 0.35 * s.gait));
+  const breath = Math.sin(s.bp) * 0.035 * (1 - 0.6 * sstep(30, 62, t));
+
+  // Blinking, then the eyes close for good.
+  if (t < 44) {
+    s.blinkT -= dt;
+    if (s.blinkT <= 0) { s.blinkPh = 0; s.blinkT = 2.6 + Math.random() * 2.6; }
+  }
+  let blink = 1;
+  if (s.blinkPh >= 0) {
+    s.blinkPh += dt;
+    const u = s.blinkPh / 0.26;
+    if (u >= 1) s.blinkPh = -1;
+    else blink = 1 - 0.95 * Math.sin(Math.PI * u);
+  }
+  const eyeOpen = blink * (1 - sstep(37, 45, t));
+
+  // Head: weak sways that fade out, then complete stillness.
+  const weak = 1 - sstep(43, 47, t);
+  const headAng = (0.05 * Math.sin(t * 0.9) + 0.07 * bump(t, 36, 1.4) + 0.05 * bump(t, 41, 1.2)) * weak;
+
+  s.pose = {
+    t, lie, restK, trem, stumble, breath, eyeOpen,
+    gait: s.gait,
+    phase: s.phase,
+    bodyDy: 96 * lie + 6 * stumble,
+    bodyRot: 0.1 * lie + 0.12 * stumble,
+    headAng,
+    headBob: (2.8 * s.gait * Math.sin(s.phase * 2) + 1.2 * Math.sin(s.bp) * (1 - restK)) * weak,
+    tailSway: Math.sin(t * 1.1) * (0.5 + 0.3 * s.wind) * (1 - 0.7 * lie),
+  };
+
+  // Dust on each footfall-stumble and on the landing.
+  for (const ev of DUST) {
+    if (prev < ev.t && t >= ev.t) {
+      for (let i = 0; i < ev.n; i++) {
+        spawnPuff(s.cx + (Math.random() - 0.5) * 170, G - 8, 1, ev.r * 0.3, ev.r, 2.4 + Math.random() * 1.6,
+          0.34, (Math.random() - 0.5) * 14, -4 - Math.random() * 8);
+      }
+    }
+  }
+
+  // Smoke: far plumes, mid plumes, and a few wisps drifting across the foreground.
+  s.farT -= dt;
+  if (s.farT <= 0) {
+    s.farT = 0.45;
+    for (const x of FAR_PLUMES) spawnPuff(x + Math.random() * 40, HORIZON - 50, 0.3, 16, 120, 9 + Math.random() * 4, 0.3, 2 + Math.random() * 2, -14 - Math.random() * 6);
+  }
+  s.midT -= dt;
+  if (s.midT <= 0) {
+    s.midT = 0.8;
+    for (const x of MID_PLUMES) spawnPuff(x + Math.random() * 30, 650, 0.62, 12, 84, 8 + Math.random() * 3, 0.3, 3, -18);
+  }
+  s.nearT -= dt;
+  if (s.nearT <= 0) {
+    s.nearT = 0.7;
+    spawnPuff(s.cam * 1.45 + Math.random() * VW, G - 40 + Math.random() * 120, 1.45, 90, 170, 9, 0.13, 3, -4);
+  }
+
+  updatePuffs(dt);
+  updateAsh(dt);
+  updateCaption();
+}
+
+/* ------------------------------ scenery drawing ------------------------------ */
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, SCENE_H);
+  g.addColorStop(0, '#4a4738');
+  g.addColorStop(0.35, '#7a7254');
+  g.addColorStop(0.62, '#cbb987');
+  g.addColorStop(1, '#2f2b22');
+  ctx.fillStyle = g;
+  ctx.fillRect(-VW, -20, VW * 3, SCENE_H + 40);
+}
+
+function drawSun() {
+  const sx = VW * 0.76, sy = 170;
+  const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, 420);
+  g.addColorStop(0, 'rgba(236,220,160,.55)');
+  g.addColorStop(1, 'rgba(236,220,160,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(sx - 420, sy - 420, 840, 840);
+  ctx.fillStyle = 'rgba(240,228,176,.5)';
+  ctx.beginPath(); ctx.arc(sx, sy, 30, 0, TAU); ctx.fill();
+}
+
+function drawClouds() {
+  const drift = sim.t * 6 * sim.wind;
+  for (const c of scene.clouds) {
+    const sx = c.wx - sim.cam * 0.08 + drift;
+    if (sx < -c.w || sx > VW) continue;
+    ctx.globalAlpha = c.a;
+    ctx.drawImage(cloudImg, sx, c.y, c.w, c.w * 160 / 512);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function ridgeY(wx, base, amp, seed) {
+  return base - amp * (
+    0.55 * Math.abs(Math.sin(wx * 0.0031 + seed)) +
+    0.30 * Math.abs(Math.sin(wx * 0.0097 + seed * 2.1)) +
+    0.15 * Math.abs(Math.sin(wx * 0.0233 + seed * 0.7))
+  );
+}
+
+// A silhouette that tiles endlessly in world space; `f` sets how fast it scrolls past.
+function drawRidge(f, base, amp, seed, color) {
+  const off = sim.cam * f;
+  ctx.beginPath();
+  ctx.moveTo(-20, SCENE_H + 10);
+  for (let wx = off - 20; wx <= off + VW + 20; wx += 8) {
+    ctx.lineTo(wx - off, ridgeY(wx, base, amp, seed));
+  }
+  ctx.lineTo(VW + 20, SCENE_H + 10);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function drawFog(y) {
+  const g = ctx.createLinearGradient(0, y - 80, 0, y + 70);
+  g.addColorStop(0, 'rgba(218,204,156,0)');
+  g.addColorStop(0.5, 'rgba(218,204,156,.3)');
+  g.addColorStop(1, 'rgba(218,204,156,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(-VW, y - 80, VW * 3, 150);
+}
+
+function drawTree(tr) {
+  const sx = tr.wx - sim.cam * tr.f;
+  if (sx < -tr.sprite.w || sx > VW + tr.sprite.w) return;
+  const sway = Math.sin(sim.t * 0.8 + tr.seed) * 0.016 * (0.4 + sim.wind * 0.6);
+  ctx.save();
+  ctx.translate(sx, tr.base);
+  ctx.rotate(sway);
+  ctx.globalAlpha = tr.alpha;
+  ctx.drawImage(tr.sprite.c, -tr.sprite.w / 2, -tr.sprite.h, tr.sprite.w, tr.sprite.h);
+  ctx.restore();
+}
+
+function drawGround() {
+  const g = ctx.createLinearGradient(0, 600, 0, SCENE_H);
+  g.addColorStop(0, '#756d5c');
+  g.addColorStop(0.4, '#5f584a');
+  g.addColorStop(1, '#2e2a22');
+  ctx.fillStyle = g;
+  const off = sim.cam;
+  ctx.beginPath();
+  ctx.moveTo(-40, SCENE_H + 10);
+  for (let wx = off - 40; wx <= off + VW + 40; wx += 10) {
+    ctx.lineTo(wx - off, 600 + 10 * Math.sin(wx * 0.012 + 1.3) + 6 * Math.sin(wx * 0.031));
+  }
+  ctx.lineTo(VW + 40, SCENE_H + 10);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawStreaks() {
+  ctx.strokeStyle = 'rgba(214,204,170,.16)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (const s of scene.streaks) {
+    const sx = s.wx - sim.cam;
+    if (sx < -s.len || sx > VW) continue;
+    ctx.moveTo(sx, s.y); ctx.lineTo(sx + s.len, s.y);
+  }
+  ctx.stroke();
+}
+
+function drawBones() {
+  ctx.lineCap = 'round';
+  for (const b of scene.bones) {
+    const sx = b.wx - sim.cam;
+    if (sx < -200 || sx > VW + 200) continue;
+    ctx.save();
+    ctx.translate(sx, G + 4);
+    ctx.rotate(b.rot);
+    ctx.fillStyle = 'rgba(206,196,164,.72)';
+    ctx.strokeStyle = 'rgba(206,196,164,.66)';
+    ctx.lineWidth = 5;
+    for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.ellipse(i * 16, 0, 7, 5, 0, 0, TAU); ctx.fill(); }
+    for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.arc(i * 18 + 4, 0, 22, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke(); }
+    ctx.restore();
+  }
+}
+
+/* ------------------------------ creature ------------------------------ */
+// Legs in creature units: hip x, and phase offset (diagonal walking gait).
+const LEG_DEFS = [
+  { hx: -122, ph: 0.00, back: true,  far: false },
+  { hx:  112, ph: 0.25, back: false, far: false },
+  { hx: -106, ph: 0.50, back: true,  far: true  },
+  { hx:  124, ph: 0.75, back: false, far: true  },
+];
+
+// Two-bone IK. The knee always bends forward. The foot is clamped to reach.
+function legIK(hx, hy, fx, fy) {
+  const dx = fx - hx, dy = fy - hy;
+  const d = clamp(Math.hypot(dx, dy) || 1, Math.abs(L1 - L2) + 0.5, L1 + L2 - 0.5);
+  const a = Math.atan2(dy, dx);
+  const A = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+  const k1 = [hx + L1 * Math.cos(a - A), hy + L1 * Math.sin(a - A)];
+  const k2 = [hx + L1 * Math.cos(a + A), hy + L1 * Math.sin(a + A)];
+  return { knee: k1[0] > k2[0] ? k1 : k2, foot: [hx + Math.cos(a) * d, hy + Math.sin(a) * d] };
+}
+
+function drawLeg(def, P, tone) {
+  const ph = P.phase + def.ph * TAU;
+  const c = Math.cos(ph), s = Math.sin(ph), g = P.gait;
+  let fx = def.hx + 40 * c * g;               // stance drags back, swing lifts and steps forward
+  let fy = -15 * Math.max(0, -s) * g;
+  if (!def.back) fx += 18 * P.stumble;        // front legs buckle during a stumble
+  fx = lerp(fx, def.hx * 0.42, P.lie);        // tuck the legs under the body as it lies down
+  fy = lerp(fy, -10, P.lie);
+  fx += P.trem * 1.6 * Math.sin(P.t * 34 + def.ph * 20);   // trembling
+  fy += P.trem * 1.2 * Math.sin(P.t * 41 + def.ph * 30);
+  const hy = -150 + P.bodyDy;
+  const { knee, foot } = legIK(def.hx, hy, fx, fy);
+
+  ctx.strokeStyle = tone;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 40;
+  ctx.beginPath(); ctx.moveTo(def.hx, hy); ctx.lineTo(knee[0], knee[1]); ctx.stroke();
+  ctx.lineWidth = 28;
+  ctx.beginPath(); ctx.moveTo(knee[0], knee[1]); ctx.lineTo(foot[0], foot[1]); ctx.stroke();
+  ctx.fillStyle = tone;
+  ctx.beginPath(); ctx.ellipse(foot[0] + 8, foot[1] - 6, 24, 10, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#231d17';
+  for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.arc(foot[0] + 18 + i * 7, foot[1] - 1, 3.2, 0, TAU); ctx.fill(); }
+}
+
+function drawTail(P) {
+  const bx = -168, by = -206 + P.bodyDy * 0.6;
+  const cx = -268, cy = lerp(-210, -70, P.lie) + P.tailSway * 10;
+  const ex = -338, ey = lerp(-168, -22, P.lie) + P.tailSway * 18;
+  ctx.fillStyle = '#4d4135';
+  const N = 16;
+  for (let i = 0; i <= N; i++) {
+    const u = i / N, iu = 1 - u;
+    const x = iu * iu * bx + 2 * iu * u * cx + u * u * ex;
+    const y = iu * iu * by + 2 * iu * u * cy + u * u * ey;
+    ctx.beginPath(); ctx.arc(x, y, lerp(34, 7, u), 0, TAU); ctx.fill();
+  }
+}
+
+function bodyPath() {
+  ctx.beginPath();
+  ctx.moveTo(-170, -214);
+  ctx.bezierCurveTo(-130, -268, 40, -300, 130, -258);
+  ctx.bezierCurveTo(182, -232, 186, -168, 150, -128);
+  ctx.bezierCurveTo(120, -96, 56, -100, 10, -98);
+  ctx.bezierCurveTo(-50, -94, -112, -104, -150, -118);
+  ctx.bezierCurveTo(-196, -136, -200, -192, -170, -214);
+  ctx.closePath();
+}
+
+function drawSpots(list) {
+  for (const m of list) {
+    ctx.fillStyle = `rgba(28,22,16,${m.a})`;
+    ctx.beginPath(); ctx.arc(m.x, m.y, m.r, 0, TAU); ctx.fill();
+  }
+}
+
+function drawBody(P) {
+  ctx.save();
+  ctx.translate(0, P.bodyDy);                       // lowering
+  ctx.translate(0, -110); ctx.rotate(P.bodyRot); ctx.translate(0, 110);   // stumble lean and lying tilt
+  ctx.translate(0, -96); ctx.scale(1 - P.breath * 0.4, 1 + P.breath); ctx.translate(0, 96);   // breathing
+  bodyPath();
+  const gr = ctx.createLinearGradient(0, -300, 0, -96);
+  gr.addColorStop(0, '#7b6a55');
+  gr.addColorStop(0.55, '#5f5143');
+  gr.addColorStop(1, '#3a3028');
+  ctx.fillStyle = gr;
+  ctx.fill();
+  ctx.save();
+  ctx.clip();
+  drawSpots(MARKS.body);
+  ctx.strokeStyle = 'rgba(32,25,19,.3)';
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  for (const w of MARKS.wrinkles) { ctx.moveTo(w[0], w[1]); ctx.quadraticCurveTo(w[2], w[3], w[4], w[5]); }
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(190,176,140,.1)';            // ash settled on the back
+  ctx.fillRect(-220, -310, 420, 60);
+  ctx.restore();
+  ctx.restore();
+}
+
+function horn(bx, by, tx, ty, w, color) {
+  const mx = (bx + tx) / 2, my = (by + ty) / 2;
+  const nx = -(ty - by), ny = tx - bx;
+  const len = Math.hypot(nx, ny) || 1;
+  const ux = nx / len, uy = ny / len;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(bx + ux * w / 2, by + uy * w / 2);
+  ctx.quadraticCurveTo(mx + ux * w * 0.35, my + uy * w * 0.35, tx, ty);
+  ctx.quadraticCurveTo(mx - ux * w * 0.35, my - uy * w * 0.35, bx - ux * w / 2, by - uy * w / 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function frillPath() {
+  ctx.beginPath();
+  const N = 18, a0 = -Math.PI / 2 - 0.2, a1 = Math.PI * 1.12;
+  for (let i = 0; i <= N; i++) {
+    const a = lerp(a0, a1, i / N), m = i % 2 ? 0.86 : 1;   // alternating radius gives the scalloped edge
+    const x = -40 + Math.cos(a) * 120 * m, y = -25 + Math.sin(a) * 95 * m;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.lineTo(-10, 0);
+  ctx.closePath();
+}
+
+function skullPath() {
+  ctx.beginPath();
+  ctx.moveTo(-78, -14);
+  ctx.bezierCurveTo(-82, -52, -40, -66, 0, -62);
+  ctx.bezierCurveTo(40, -60, 68, -46, 100, -30);
+  ctx.quadraticCurveTo(122, -20, 134, -8);
+  ctx.quadraticCurveTo(124, 8, 100, 12);
+  ctx.bezierCurveTo(72, 30, 40, 46, 0, 48);
+  ctx.bezierCurveTo(-40, 50, -72, 40, -78, 14);
+  ctx.closePath();
+}
+
+function drawHead(P) {
+  horn(26, -50, 56, -124, 24, '#5b5044');            // far brow horn, behind the skull
+  frillPath();
+  const fg = ctx.createLinearGradient(0, -130, 0, 10);
+  fg.addColorStop(0, '#7d6d59');
+  fg.addColorStop(1, '#4a3f33');
+  ctx.fillStyle = fg;
+  ctx.fill();
+  ctx.strokeStyle = '#302820';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.save(); frillPath(); ctx.clip(); drawSpots(MARKS.frill); ctx.restore();
+  ctx.fillStyle = 'rgba(38,30,24,.55)';              // frill openings
+  ctx.beginPath(); ctx.ellipse(-84, -58, 13, 7, -0.5, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-112, -22, 11, 6, 0.2, 0, TAU); ctx.fill();
+
+  skullPath();
+  const sg = ctx.createLinearGradient(0, -62, 0, 48);
+  sg.addColorStop(0, '#7e6d58');
+  sg.addColorStop(1, '#4b4035');
+  ctx.fillStyle = sg;
+  ctx.fill();
+  ctx.strokeStyle = '#2d251d';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.save(); skullPath(); ctx.clip(); drawSpots(MARKS.head); ctx.restore();
+
+  horn(42, -56, 84, -134, 30, '#d8cbaf');            // near brow horn
+  horn(104, -22, 150, -42, 20, '#cdbf9f');           // nose horn
+
+  // eye: the lid slides down as the eye closes
+  const e = P.eyeOpen;
+  ctx.fillStyle = '#2a2017';
+  ctx.beginPath(); ctx.ellipse(30, -20, 10, 8.5, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#a7823d';
+  ctx.beginPath(); ctx.ellipse(30, -20, 7, Math.max(0.6, 7 * e), 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#100b07';
+  ctx.beginPath(); ctx.ellipse(30, -20, 2.6, Math.max(0.6, 5 * e), 0, 0, TAU); ctx.fill();
+  const lidY = -31 + 18 * (1 - e);
+  ctx.fillStyle = '#7b6a56';
+  ctx.beginPath(); ctx.ellipse(30, lidY - 14, 14, 14, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#2a2017';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(19, lidY); ctx.quadraticCurveTo(30, lidY + 2.5, 41, lidY); ctx.stroke();
+
+  ctx.strokeStyle = '#241b14';                       // mouth
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(124, 4); ctx.quadraticCurveTo(82, 22, 34, 14); ctx.stroke();
+  ctx.fillStyle = '#2a2119';                         // nostril
+  ctx.beginPath(); ctx.arc(126, -16, 2.4, 0, TAU); ctx.fill();
+}
+
+function drawNeckHead(P) {
+  const k = P.restK;
+  const hx = lerp(262, 300, k), hy = lerp(-262, -30, k) + P.headBob;
+  const ang = lerp(-0.12, 0.2, k) + P.headAng;
+  const ax = 140, ay = -240 + P.bodyDy * 0.95;
+  const qx = lerp(196, 232, k), qy = lerp(-330, -112, k);
+  const nx = hx - 62, ny = hy + 10;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.quadraticCurveTo(qx, qy, nx, ny);
+  ctx.strokeStyle = '#3a3026';
+  ctx.lineWidth = 104;
+  ctx.stroke();
+  ctx.strokeStyle = '#64544a';
+  ctx.lineWidth = 90;
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(hx, hy);
+  ctx.rotate(ang);
+  drawHead(P);
+  ctx.restore();
+}
+
+function drawCreature(P) {
+  ctx.save();
+  ctx.translate(SX0, G);
+  ctx.scale(cK, cK);
+  drawTail(P);
+  for (const d of LEG_DEFS) if (d.far) drawLeg(d, P, '#3f352b');
+  drawBody(P);
+  for (const d of LEG_DEFS) if (!d.far) drawLeg(d, P, '#5a4b3e');
+  drawNeckHead(P);
+  ctx.restore();
+}
+
+/* ------------------------------ frame ------------------------------ */
+function draw() {
+  const P = sim.pose, t = sim.t;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(dpr * S, 0, 0, dpr * S, 0, 0);
+
+  // Camera: a slow dolly that settles on the animal, with a gentle rise as it lies down.
+  const z = 1.06 - 0.06 * sstep(0, 9, t) + 0.16 * sstep(46, END, t);
+  const fx = SX0, fy = G - 200 * cK;
+  ctx.translate(0, -14 * sstep(30, END, t));
+  ctx.translate(fx, fy);
+  ctx.scale(z, z);
+  ctx.translate(-fx, -fy);
+
+  drawSky();
+  drawSun();
+  drawClouds();
+  drawPuffs(0, 0.4);
+  drawRidge(0.16, 470, 90, 1.3, '#9c9477');        // far mountains
+  drawFog(HORIZON - 30);
+  for (const tr of scene.far) drawTree(tr);
+  drawRidge(0.42, 545, 62, 4.1, '#7b7360');        // mid hills
+  drawPuffs(0.4, 0.8);
+  for (const tr of scene.mid) drawTree(tr);
+  drawGround();
+  drawStreaks();
+  drawBones();
+  drawPuffs(0.8, 1.2);
+  for (const tr of scene.near) drawTree(tr);
+  drawCreature(P);
+  for (const tr of scene.fore) drawTree(tr);       // foreground trees pass the camera fastest
+  drawPuffs(1.2, 2);
+  drawAsh();
+
+  fadeEl.style.opacity = clamp(1 - sstep(0.2, 2.8, t) + 0.5 * sstep(62, END, t)).toFixed(3);
+  replayBtn.classList.toggle('show', t >= END);
+}
+
+function reset() {
+  Object.assign(sim, {
+    t: 0, cx: 0, phase: 0, gait: 0, cam: -SX0, wind: 0.5, bp: 0,
+    blinkT: 2.4, blinkPh: -1, capIdx: -2, farT: 0, midT: 0, nearT: 0,
+  });
+  puffs.length = 0;
+  update(0);
+}
+
+let last = 0;
+function frame(now) {
+  const dt = last ? Math.min(0.05, (now - last) / 1000) : 0;
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------ start ------------------------------ */
+let resizeTimer = 0;
+window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 150); });
+replayBtn.addEventListener('click', reset);
+
+resize();
+reset();
+// Optional deep link for previewing a moment: ?t=40
+const jump = parseFloat(new URLSearchParams(location.search).get('t'));
+if (Number.isFinite(jump)) for (let i = 0; i < 60 * END && sim.t < jump; i++) update(1 / 60);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
